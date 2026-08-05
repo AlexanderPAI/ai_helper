@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import sys
 from collections.abc import Mapping, Sequence
 from operator import add
 from typing import Annotated, Any, Protocol, TypedDict
@@ -10,6 +13,8 @@ from uuid import UUID, uuid4
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from openai import OpenAIError
+from pydantic import ValidationError
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -130,3 +135,59 @@ class Agent:
     async def areset_context(self, *, session_id: UUID | None = None) -> None:
         """Asynchronously delete all stored messages for one dialog session."""
         await self.checkpointer.adelete_thread(self._thread_id(session_id))
+
+
+async def _run_console(session_id: UUID | None = None) -> None:
+    """Run an interactive console dialog using the configured provider."""
+    from .providers import OpenRouterProvider
+
+    async with OpenRouterProvider() as provider:
+        agent = Agent(provider, session_id=session_id)
+
+        print(f"Session: {agent.session_id}")
+        print("Commands: /reset — reset context, /exit — exit")
+
+        while True:
+            try:
+                prompt = await asyncio.to_thread(input, "You: ")
+            except EOFError, KeyboardInterrupt:
+                print()
+                break
+
+            prompt = prompt.strip()
+            if not prompt:
+                continue
+            if prompt in {"/exit", "/quit"}:
+                break
+            if prompt == "/reset":
+                await agent.areset_context()
+                print("Context reset.")
+                continue
+
+            try:
+                response = await agent.ainvoke(prompt)
+            except OpenAIError as error:
+                print(f"Error: {error}")
+                continue
+
+            print(f"Agent: {response}")
+
+
+def main() -> None:
+    """Parse command-line arguments and start the interactive agent."""
+    parser = argparse.ArgumentParser(description="Run the agent in the console")
+    parser.add_argument(
+        "--session-id",
+        type=UUID,
+        help="UUID to use for this conversation (a new UUID is created by default)",
+    )
+    arguments = parser.parse_args()
+    try:
+        asyncio.run(_run_console(arguments.session_id))
+    except ValidationError as error:
+        print(f"Failed to start agent: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+
+if __name__ == "__main__":
+    main()
