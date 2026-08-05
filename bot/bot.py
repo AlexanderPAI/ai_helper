@@ -84,8 +84,16 @@ class TelegramAgentBot:
                     session_id,
                 )
                 await self.agent.areset_context(session_id=session_id)
+                new_session_id = uuid4()
+                self._session_ids[message.chat.id] = new_session_id
                 await message.reply("Контекст чата сброшен.")
-                logger.info("Context reset completed chat_id=%s", message.chat.id)
+                logger.info(
+                    "Context reset completed chat_id=%s old_session_id=%s "
+                    "new_session_id=%s",
+                    message.chat.id,
+                    session_id,
+                    new_session_id,
+                )
                 return
 
             if not prompt:
