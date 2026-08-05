@@ -91,6 +91,46 @@ python -m bot
 venv/bin/python -m bot
 ```
 
+## Запуск через Docker Compose
+
+Для контейнерного запуска нужны Docker и Docker Compose. Убедитесь, что `.env`
+создан и заполнен, затем выполните из корня проекта:
+
+```bash
+docker compose up --build -d
+```
+
+Бот работает через long polling, поэтому публиковать порты контейнера не нужно.
+Compose передаёт переменные из `.env` внутрь контейнера. Сам `.env` исключён из
+контекста сборки через `.dockerignore` и не попадает в Docker-образ.
+
+Просмотр логов в реальном времени:
+
+```bash
+docker compose logs -f bot
+```
+
+Проверка состояния контейнера:
+
+```bash
+docker compose ps
+```
+
+Остановка и удаление контейнера:
+
+```bash
+docker compose down
+```
+
+После изменения исходного кода или зависимостей пересоберите образ:
+
+```bash
+docker compose up --build -d
+```
+
+Контейнер запускается от непривилегированного пользователя и автоматически
+перезапускается после сбоя, пока он не остановлен вручную.
+
 После запуска в терминале отображаются:
 
 - подключение к Telegram;
@@ -180,6 +220,9 @@ ai_helper/
 │   ├── bot.py                # aiogram handlers и управление сессиями
 │   └── settings.py           # настройки Telegram
 ├── .env.example
+├── .dockerignore
+├── Dockerfile
+├── docker-compose.yaml
 ├── pyproject.toml
 └── poetry.lock
 ```

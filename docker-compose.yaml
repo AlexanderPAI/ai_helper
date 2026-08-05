@@ -1,0 +1,13 @@
+name: ai-helper
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-helper-bot:local
+    env_file:
+      - .env
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
