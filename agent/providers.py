@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any, Self
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+from .settings import OpenRouterSettings
 
 
 class OpenRouterProvider:
@@ -22,39 +19,22 @@ class OpenRouterProvider:
     ``OPENROUTER_SITE_URL`` and ``OPENROUTER_APP_NAME``.
     """
 
-    BASE_URL = "https://openrouter.ai/api/v1"
-
     def __init__(
         self,
         *,
-        api_key: str | None = None,
-        model: str | None = None,
-        site_url: str | None = None,
-        app_name: str | None = None,
-        timeout: float = 60.0,
+        settings: OpenRouterSettings | None = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
-        self.model = model or os.getenv("OPENROUTER_MODEL")
-
-        if not self.api_key:
-            raise ValueError(
-                "OpenRouter API key is required. Pass api_key or set "
-                "OPENROUTER_API_KEY."
-            )
-        if not self.model:
-            raise ValueError(
-                "OpenRouter model is required. Pass model or set OPENROUTER_MODEL."
-            )
+        self.settings = settings or OpenRouterSettings()  # type: ignore[call-arg]
 
         headers = self._build_headers(
-            site_url=site_url or os.getenv("OPENROUTER_SITE_URL"),
-            app_name=app_name or os.getenv("OPENROUTER_APP_NAME"),
+            site_url=str(self.settings.site_url) if self.settings.site_url else None,
+            app_name=self.settings.app_name,
         )
         client_options = {
-            "api_key": self.api_key,
-            "base_url": self.BASE_URL,
+            "api_key": self.settings.api_key.get_secret_value(),
+            "base_url": str(self.settings.base_url),
             "default_headers": headers,
-            "timeout": timeout,
+            "timeout": self.settings.timeout,
         }
         self.client = OpenAI(**client_options)
         self.async_client = AsyncOpenAI(**client_options)
@@ -75,7 +55,7 @@ class OpenRouterProvider:
     ) -> ChatCompletion:
         """Create a chat completion using the configured model."""
         return self.client.chat.completions.create(
-            model=self.model,
+            model=self.settings.model,
             messages=list(messages),  # type: ignore[arg-type]
             **options,
         )
@@ -87,7 +67,7 @@ class OpenRouterProvider:
     ) -> ChatCompletion:
         """Asynchronously create a chat completion."""
         return await self.async_client.chat.completions.create(
-            model=self.model,
+            model=self.settings.model,
             messages=list(messages),  # type: ignore[arg-type]
             **options,
         )
