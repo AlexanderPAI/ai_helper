@@ -9,8 +9,9 @@ from uuid import UUID, uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import MessageEntityType
-from aiogram.types import Message
+from aiogram.types import Message, MessageEntity
 from openai import OpenAIError
+from telegramify_markdown import convert, split_entities
 
 from agent import Agent, OpenRouterProvider
 
@@ -67,7 +68,22 @@ class TelegramAgentBot:
                 await message.reply("Не удалось получить ответ от модели.")
                 return
 
-            await message.reply(response)
+            await self._reply_with_markdown(message, response)
+
+    @staticmethod
+    async def _reply_with_markdown(message: Message, markdown: str) -> None:
+        """Render model Markdown as Telegram-native formatted text."""
+        text, entities = convert(markdown)
+        chunks = split_entities(text, entities, max_utf16_len=4096)
+
+        for index, (chunk_text, chunk_entities) in enumerate(chunks):
+            telegram_entities = [
+                MessageEntity(**entity.to_dict()) for entity in chunk_entities
+            ]
+            if index == 0:
+                await message.reply(chunk_text, entities=telegram_entities)
+            else:
+                await message.answer(chunk_text, entities=telegram_entities)
 
     def _extract_prompt(self, message: Message) -> str | None:
         """Return text without this bot's @mention, or None if not mentioned."""
