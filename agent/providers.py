@@ -60,6 +60,15 @@ class OpenRouterProvider:
             **options,
         )
 
+    def generate(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        **options: Any,
+    ) -> str:
+        """Return only the model text expected by the agent."""
+        completion = self.chat(messages, **options)
+        return completion.choices[0].message.content or ""
+
     async def achat(
         self,
         messages: Sequence[Mapping[str, Any]],
@@ -71,6 +80,15 @@ class OpenRouterProvider:
             messages=list(messages),  # type: ignore[arg-type]
             **options,
         )
+
+    async def agenerate(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        **options: Any,
+    ) -> str:
+        """Asynchronously return only the model text expected by the agent."""
+        completion = await self.achat(messages, **options)
+        return completion.choices[0].message.content or ""
 
     def close(self) -> None:
         """Close resources owned by the synchronous client."""
