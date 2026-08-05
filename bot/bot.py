@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import MessageEntityType
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message, MessageEntity
 from openai import OpenAIError
 from telegramify_markdown import convert, split_entities
@@ -20,6 +21,13 @@ from agent import Agent, OpenRouterProvider
 from .settings import TelegramSettings
 
 logger = logging.getLogger(__name__)
+
+STATUS_UPDATE_INTERVAL = 5
+STATUS_MESSAGES = (
+    "🔎 Анализирую вопрос…",
+    "🧠 Обдумываю ответ…",
+    "✍️ Формирую ответ…",
+)
 
 
 class TelegramAgentBot:
@@ -85,9 +93,10 @@ class TelegramAgentBot:
                 return
 
             started_at = monotonic()
+            status_message = await message.reply("⏳ Получил вопрос. Готовлю ответ…")
             logger.info("LLM request started chat_id=%s", message.chat.id)
             progress_task = asyncio.create_task(
-                self._log_request_progress(message.chat.id, started_at)
+                self._update_request_status(status_message, started_at)
             )
             try:
                 response = await self.agent.ainvoke(prompt, session_id=session_id)
@@ -97,7 +106,9 @@ class TelegramAgentBot:
                     message.chat.id,
                     monotonic() - started_at,
                 )
-                await message.reply("Не удалось получить ответ от модели.")
+                await status_message.edit_text(
+                    "❌ Не удалось получить ответ от модели."
+                )
                 return
             finally:
                 progress_task.cancel()
@@ -110,7 +121,11 @@ class TelegramAgentBot:
                 monotonic() - started_at,
                 len(response),
             )
-            chunks_sent = await self._reply_with_markdown(message, response)
+            chunks_sent = await self._replace_status_with_response(
+                message,
+                status_message,
+                response,
+            )
             logger.info(
                 "Response sent chat_id=%s chunks=%d total_time=%.1fs",
                 message.chat.id,
@@ -119,19 +134,42 @@ class TelegramAgentBot:
             )
 
     @staticmethod
-    async def _log_request_progress(chat_id: int, started_at: float) -> None:
-        """Periodically report that a long LLM request is still running."""
+    async def _update_request_status(
+        status_message: Message,
+        started_at: float,
+    ) -> None:
+        """Periodically update one Telegram message while the LLM is working."""
+        update_index = 0
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(STATUS_UPDATE_INTERVAL)
+            elapsed = monotonic() - started_at
+            status = STATUS_MESSAGES[update_index % len(STATUS_MESSAGES)]
+            update_index += 1
+
+            try:
+                await status_message.edit_text(
+                    f"{status}\n\nПрошло: {elapsed:.0f} сек."
+                )
+            except TelegramAPIError:
+                logger.warning(
+                    "Failed to update status chat_id=%s",
+                    status_message.chat.id,
+                    exc_info=True,
+                )
+
             logger.info(
                 "LLM request still running chat_id=%s elapsed=%.1fs",
-                chat_id,
-                monotonic() - started_at,
+                status_message.chat.id,
+                elapsed,
             )
 
     @staticmethod
-    async def _reply_with_markdown(message: Message, markdown: str) -> int:
-        """Render model Markdown as Telegram-native formatted text."""
+    async def _replace_status_with_response(
+        request_message: Message,
+        status_message: Message,
+        markdown: str,
+    ) -> int:
+        """Replace the progress status with a Telegram-formatted response."""
         text, entities = convert(markdown)
         chunks = split_entities(text, entities, max_utf16_len=4096)
 
@@ -140,9 +178,15 @@ class TelegramAgentBot:
                 MessageEntity(**entity.to_dict()) for entity in chunk_entities
             ]
             if index == 0:
-                await message.reply(chunk_text, entities=telegram_entities)
+                await status_message.edit_text(
+                    chunk_text,
+                    entities=telegram_entities,
+                )
             else:
-                await message.answer(chunk_text, entities=telegram_entities)
+                await request_message.answer(
+                    chunk_text,
+                    entities=telegram_entities,
+                )
         return len(chunks)
 
     def _extract_prompt(self, message: Message) -> str | None:
