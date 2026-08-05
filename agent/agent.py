@@ -16,6 +16,8 @@ from langgraph.graph import END, START, StateGraph
 from openai import OpenAIError
 from pydantic import ValidationError
 
+from .prompts import load_system_prompt
+
 TELEGRAM_MESSAGE_LIMIT = 4096
 
 
@@ -68,6 +70,7 @@ class Agent:
         self.session_id = session_id or uuid4()
         self.max_response_length = max_response_length
         self.provider_options = dict(provider_options or {})
+        self.system_prompt = load_system_prompt()
         self.checkpointer = InMemorySaver()
         self.graph = self._build_graph()
 
@@ -81,17 +84,23 @@ class Agent:
 
     def _call_provider(self, state: AgentState) -> AgentState:
         response = self.provider.generate(
-            state["messages"],
+            self._messages_for_provider(state),
             **self.provider_options,
         )
         return {"messages": [self._assistant_message(response)]}
 
     async def _acall_provider(self, state: AgentState) -> AgentState:
         response = await self.provider.agenerate(
-            state["messages"],
+            self._messages_for_provider(state),
             **self.provider_options,
         )
         return {"messages": [self._assistant_message(response)]}
+
+    def _messages_for_provider(self, state: AgentState) -> list[Message]:
+        return [
+            {"role": "system", "content": self.system_prompt},
+            *state["messages"],
+        ]
 
     def _assistant_message(self, response: str) -> Message:
         if not isinstance(response, str):
