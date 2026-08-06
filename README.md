@@ -23,6 +23,7 @@ Telegram-бот с диалоговым AI-агентом на LangGraph. Аге
 - Poetry;
 - токен Telegram-бота от BotFather;
 - API-ключ OpenRouter.
+- API-ключ Humor API.
 
 ## Рекомендуемые требования к VPS
 
@@ -97,6 +98,13 @@ OPENROUTER_SITE_URL=
 OPENROUTER_APP_NAME=ai-helper
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_TIMEOUT=60
+
+# Humor API
+HUMOR_API_API_KEY=your_humor_api_key
+HUMOR_API_RANDOM_URL=https://api.humorapi.com/memes/random
+HUMOR_API_SEARCH_URL=https://api.humorapi.com/memes/search
+HUMOR_API_TIMEOUT=15
+HUMOR_API_USER_AGENT=ai-helper/0.1
 
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token

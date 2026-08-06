@@ -13,7 +13,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .prompts import load_system_prompt
 from .providers import LLMProvider, LLMResponse
-from .tools import DEFAULT_TOOLS, AgentTool
+from .tools import AgentTool, MemeResult, ToolResult
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     """Conversation history accumulated by the graph checkpointer."""
 
     messages: Annotated[list[Message], add]
+    output: ToolResult
 
 
 class Agent:
@@ -41,7 +42,7 @@ class Agent:
         session_id: UUID | None = None,
         max_response_length: int = TELEGRAM_MESSAGE_LIMIT,
         provider_options: Mapping[str, Any] | None = None,
-        tools: Sequence[AgentTool] = DEFAULT_TOOLS,
+        tools: Sequence[AgentTool] = (),
     ) -> None:
         if max_response_length < 1:
             raise ValueError("max_response_length must be greater than zero")
@@ -72,14 +73,22 @@ class Agent:
             self._messages_for_provider(state),
             **self._provider_options(),
         )
-        return {"messages": [self._assistant_message(self._response_text(response))]}
+        output = self._response_output(response)
+        return {
+            "messages": [self._assistant_message(self._history_text(output))],
+            "output": output,
+        }
 
     async def _acall_provider(self, state: AgentState) -> AgentState:
         response = await self.provider.agenerate(
             self._messages_for_provider(state),
             **self._provider_options(),
         )
-        return {"messages": [self._assistant_message(self._response_text(response))]}
+        output = await self._aresponse_output(response)
+        return {
+            "messages": [self._assistant_message(self._history_text(output))],
+            "output": output,
+        }
 
     def _provider_options(self) -> dict[str, Any]:
         options = dict(self.provider_options)
@@ -88,7 +97,22 @@ class Agent:
             options["tool_choice"] = "auto"
         return options
 
-    def _response_text(self, response: LLMResponse) -> str:
+    def _response_output(self, response: LLMResponse) -> ToolResult:
+        if not isinstance(response, LLMResponse):
+            raise TypeError("provider must return an LLMResponse")
+        if not response.tool_calls:
+            return response.content
+
+        results: list[ToolResult] = []
+        for tool_call in response.tool_calls:
+            try:
+                tool = self.tools[tool_call.name]
+            except KeyError as error:
+                raise ValueError(f"unknown tool requested: {tool_call.name}") from error
+            results.append(tool.invoke(tool_call.arguments))
+        return self._combine_tool_results(results)
+
+    async def _aresponse_output(self, response: LLMResponse) -> ToolResult:
         if not isinstance(response, LLMResponse):
             raise TypeError("provider must return an LLMResponse")
         if not response.tool_calls:
@@ -100,8 +124,22 @@ class Agent:
                 tool = self.tools[tool_call.name]
             except KeyError as error:
                 raise ValueError(f"unknown tool requested: {tool_call.name}") from error
-            results.append(tool.invoke(tool_call.arguments))
+            results.append(await tool.ainvoke(tool_call.arguments))
+        return self._combine_tool_results(results)
+
+    @staticmethod
+    def _combine_tool_results(results: list[ToolResult]) -> ToolResult:
+        if len(results) == 1:
+            return results[0]
+        if any(isinstance(result, MemeResult) for result in results):
+            raise ValueError("image tools cannot be combined with other tool calls")
         return "\n".join(results)
+
+    @staticmethod
+    def _history_text(output: ToolResult) -> str:
+        if isinstance(output, MemeResult):
+            return f"[Отправлен мем Humor API, id={output.id}]"
+        return output
 
     def _messages_for_provider(self, state: AgentState) -> list[Message]:
         return [
@@ -128,21 +166,23 @@ class Agent:
             raise TypeError("session_id must be a UUID")
         return str(resolved_session_id)
 
-    def invoke(self, prompt: str, *, session_id: UUID | None = None) -> str:
+    def invoke(self, prompt: str, *, session_id: UUID | None = None) -> ToolResult:
         """Send a prompt within a session and return a size-limited response."""
         result = self.graph.invoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=self._config(session_id),
         )
-        return result["messages"][-1]["content"]
+        return result["output"]
 
-    async def ainvoke(self, prompt: str, *, session_id: UUID | None = None) -> str:
+    async def ainvoke(
+        self, prompt: str, *, session_id: UUID | None = None
+    ) -> ToolResult:
         """Asynchronously send a prompt within a session."""
         result = await self.graph.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=self._config(session_id),
         )
-        return result["messages"][-1]["content"]
+        return result["output"]
 
     def reset_context(self, *, session_id: UUID | None = None) -> None:
         """Delete all stored messages for one dialog session."""

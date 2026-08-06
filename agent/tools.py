@@ -2,10 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import re
 from collections.abc import Mapping
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-MEME_PLACEHOLDER = "Скоро здесь будет приходить мем"
+from .settings import HumorAPISettings
+
+logger = logging.getLogger(__name__)
+
+
+class AgentToolError(RuntimeError):
+    """Raised when an agent tool cannot complete its operation."""
+
+
+class EmptyMemeSearchError(AgentToolError):
+    """Raised internally when a valid meme search has no results."""
+
+
+@dataclass(frozen=True, slots=True)
+class MemeResult:
+    """A ready-to-send meme returned by a meme provider."""
+
+    id: int
+    url: str
+    media_type: str
+
+
+ToolResult = str | MemeResult
 
 
 class AgentTool(Protocol):
@@ -17,18 +47,27 @@ class AgentTool(Protocol):
     @property
     def schema(self) -> Mapping[str, Any]: ...
 
-    def invoke(self, arguments: Mapping[str, Any]) -> str: ...
+    def invoke(self, arguments: Mapping[str, Any]) -> ToolResult: ...
+
+    async def ainvoke(self, arguments: Mapping[str, Any]) -> ToolResult: ...
 
 
 class SendMemeTool:
-    """Placeholder for sending a contextually appropriate meme to the chat."""
+    """Fetch a contextually appropriate ready-made meme from Humor API."""
 
     name = "send_meme"
     description = (
-        "Отправить в чат уместный мем, когда он хорошо подходит к контексту "
-        "диалога. Не вызывай инструмент без повода и не вызывай его вместо "
-        "обычного содержательного ответа на вопрос пользователя."
+        "Отправить в чат готовый мем через Humor API. Если пользователь просит "
+        "просто любой мем и не называет тему, ОБЯЗАТЕЛЬНО используй mode=random "
+        "без keywords. Используй mode=search только при наличии конкретной темы. "
+        "Для search ОБЯЗАТЕЛЬНО переведи тему пользователя на английский и передай "
+        "ровно одно широкое английское ключевое слово в keywords. Никогда не "
+        "передавай русские слова или несколько слов в "
+        "keywords. Не вызывай инструмент без уместного повода."
     )
+
+    def __init__(self, settings: HumorAPISettings) -> None:
+        self.settings = settings
 
     @property
     def schema(self) -> Mapping[str, Any]:
@@ -39,17 +78,135 @@ class SendMemeTool:
                 "description": self.description,
                 "parameters": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["random", "search"],
+                            "description": (
+                                "Используй random для просьбы прислать любой мем "
+                                "без указанной темы. Используй search только для "
+                                "явно указанной темы"
+                            ),
+                        },
+                        "keywords": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 50,
+                            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                            "description": (
+                                "Ровно одно широкое английское ключевое слово. "
+                                "Сам переведи сюда тему пользователя с любого "
+                                "языка. Обязательно для search и не передаётся "
+                                "для random"
+                            ),
+                        },
+                    },
+                    "required": ["mode"],
                     "additionalProperties": False,
                 },
             },
         }
 
-    def invoke(self, arguments: Mapping[str, Any]) -> str:
-        """Return a temporary message until image delivery is implemented."""
-        if arguments:
-            raise ValueError("send_meme does not accept arguments")
-        return MEME_PLACEHOLDER
+    def invoke(self, arguments: Mapping[str, Any]) -> MemeResult:
+        """Fetch exactly one meme using the mode selected by the agent."""
+        mode, keywords = self._parse_arguments(arguments)
+        payload = self._request(mode, keywords)
+        try:
+            return self._parse_response(payload, mode)
+        except EmptyMemeSearchError:
+            logger.info(
+                "Humor API search returned no memes; falling back to random "
+                "keywords=%r",
+                keywords,
+            )
+            return self._parse_response(self._request("random", None), "random")
 
+    def _request(
+        self,
+        mode: Literal["random", "search"],
+        keywords: str | None,
+    ) -> Any:
+        url = self._request_url(mode)
+        query: dict[str, str | int] = {}
+        if keywords:
+            query["keywords"] = keywords
+        if mode == "search":
+            query["number"] = 1
 
-DEFAULT_TOOLS: tuple[AgentTool, ...] = (SendMemeTool(),)
+        request = Request(
+            f"{url}?{urlencode(query)}" if query else url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": self.settings.user_agent,
+                "x-api-key": self.settings.api_key.get_secret_value(),
+            },
+        )
+        try:
+            with urlopen(request, timeout=self.settings.timeout) as response:
+                payload = json.load(response)
+        except HTTPError as error:
+            raise AgentToolError(f"Humor API returned HTTP {error.code}") from error
+        except (URLError, TimeoutError, json.JSONDecodeError) as error:
+            raise AgentToolError("Humor API request failed") from error
+
+        return payload
+
+    async def ainvoke(self, arguments: Mapping[str, Any]) -> MemeResult:
+        """Fetch one meme without blocking the agent event loop."""
+        return await asyncio.to_thread(self.invoke, arguments)
+
+    def _request_url(self, mode: Literal["random", "search"]) -> str:
+        if mode == "random":
+            return str(self.settings.random_url)
+        return str(self.settings.search_url)
+
+    @staticmethod
+    def _parse_arguments(
+        arguments: Mapping[str, Any],
+    ) -> tuple[Literal["random", "search"], str | None]:
+        mode = arguments.get("mode")
+        if mode not in {"random", "search"}:
+            raise AgentToolError("send_meme mode must be random or search")
+
+        raw_keywords = arguments.get("keywords")
+        if raw_keywords is not None and not isinstance(raw_keywords, str):
+            raise AgentToolError("send_meme keywords must be a string")
+        keywords = raw_keywords.strip() if raw_keywords else None
+        if mode == "search" and not keywords:
+            raise AgentToolError("send_meme search mode requires keywords")
+        if keywords:
+            english_words = re.findall(r"[A-Za-z][A-Za-z0-9_-]*", keywords)
+            if not english_words:
+                logger.info("send_meme received no English keywords; using random mode")
+                return "random", None
+            keywords = english_words[0]
+        return mode, keywords
+
+    @staticmethod
+    def _parse_response(payload: Any, mode: Literal["random", "search"]) -> MemeResult:
+        if not isinstance(payload, dict):
+            raise AgentToolError("Humor API returned an invalid response")
+
+        meme: Any
+        if mode == "search":
+            memes = payload.get("memes")
+            if not isinstance(memes, list) or not memes:
+                raise EmptyMemeSearchError("Humor API did not find a matching meme")
+            meme = memes[0]
+        else:
+            meme = payload
+
+        if not isinstance(meme, dict):
+            raise AgentToolError("Humor API returned an invalid meme")
+        meme_id = meme.get("id")
+        url = meme.get("url")
+        media_type = meme.get("type")
+        if (
+            not isinstance(meme_id, int)
+            or not isinstance(url, str)
+            or not url.startswith(("https://", "http://"))
+            or not isinstance(media_type, str)
+            or not media_type.startswith("image/")
+        ):
+            raise AgentToolError("Humor API returned an invalid meme")
+        return MemeResult(id=meme_id, url=url, media_type=media_type)

@@ -3,15 +3,18 @@
 from typing import Any
 
 from .providers import LLMProvider, LLMResponse, OpenRouterProvider, ToolCall
-from .settings import OpenRouterSettings
-from .tools import AgentTool, SendMemeTool
+from .settings import HumorAPISettings, OpenRouterSettings
+from .tools import AgentTool, AgentToolError, MemeResult, SendMemeTool
 
 __all__ = [
     "TELEGRAM_MESSAGE_LIMIT",
     "Agent",
     "AgentTool",
+    "AgentToolError",
+    "HumorAPISettings",
     "LLMProvider",
     "LLMResponse",
+    "MemeResult",
     "OpenRouterProvider",
     "OpenRouterSettings",
     "SendMemeTool",
