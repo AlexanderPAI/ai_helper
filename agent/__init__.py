@@ -2,15 +2,20 @@
 
 from typing import Any
 
-from .providers import LLMProvider, OpenRouterProvider
+from .providers import LLMProvider, LLMResponse, OpenRouterProvider, ToolCall
 from .settings import OpenRouterSettings
+from .tools import AgentTool, SendMemeTool
 
 __all__ = [
     "TELEGRAM_MESSAGE_LIMIT",
     "Agent",
+    "AgentTool",
     "LLMProvider",
+    "LLMResponse",
     "OpenRouterProvider",
     "OpenRouterSettings",
+    "SendMemeTool",
+    "ToolCall",
 ]
 
 

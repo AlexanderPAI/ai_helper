@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from operator import add
 from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
@@ -12,7 +12,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .prompts import load_system_prompt
-from .providers import LLMProvider
+from .providers import LLMProvider, LLMResponse
+from .tools import DEFAULT_TOOLS, AgentTool
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -40,6 +41,7 @@ class Agent:
         session_id: UUID | None = None,
         max_response_length: int = TELEGRAM_MESSAGE_LIMIT,
         provider_options: Mapping[str, Any] | None = None,
+        tools: Sequence[AgentTool] = DEFAULT_TOOLS,
     ) -> None:
         if max_response_length < 1:
             raise ValueError("max_response_length must be greater than zero")
@@ -50,6 +52,9 @@ class Agent:
         self.session_id = session_id or uuid4()
         self.max_response_length = max_response_length
         self.provider_options = dict(provider_options or {})
+        self.tools = {tool.name: tool for tool in tools}
+        if len(self.tools) != len(tools):
+            raise ValueError("tool names must be unique")
         self.system_prompt = load_system_prompt()
         self.checkpointer = InMemorySaver()
         self.graph = self._build_graph()
@@ -65,16 +70,38 @@ class Agent:
     def _call_provider(self, state: AgentState) -> AgentState:
         response = self.provider.generate(
             self._messages_for_provider(state),
-            **self.provider_options,
+            **self._provider_options(),
         )
-        return {"messages": [self._assistant_message(response)]}
+        return {"messages": [self._assistant_message(self._response_text(response))]}
 
     async def _acall_provider(self, state: AgentState) -> AgentState:
         response = await self.provider.agenerate(
             self._messages_for_provider(state),
-            **self.provider_options,
+            **self._provider_options(),
         )
-        return {"messages": [self._assistant_message(response)]}
+        return {"messages": [self._assistant_message(self._response_text(response))]}
+
+    def _provider_options(self) -> dict[str, Any]:
+        options = dict(self.provider_options)
+        if self.tools:
+            options["tools"] = [tool.schema for tool in self.tools.values()]
+            options["tool_choice"] = "auto"
+        return options
+
+    def _response_text(self, response: LLMResponse) -> str:
+        if not isinstance(response, LLMResponse):
+            raise TypeError("provider must return an LLMResponse")
+        if not response.tool_calls:
+            return response.content
+
+        results = []
+        for tool_call in response.tool_calls:
+            try:
+                tool = self.tools[tool_call.name]
+            except KeyError as error:
+                raise ValueError(f"unknown tool requested: {tool_call.name}") from error
+            results.append(tool.invoke(tool_call.arguments))
+        return "\n".join(results)
 
     def _messages_for_provider(self, state: AgentState) -> list[Message]:
         return [

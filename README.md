@@ -245,7 +245,7 @@ ai_helper/
 │   ├── agent.py              # LangGraph-агент и консольный режим
 │   ├── providers.py          # провайдер OpenRouter
 │   ├── settings.py           # настройки OpenRouter
-│   ├── tools.py              # место для будущих tools
+│   ├── tools.py              # инструменты, доступные агенту
 │   └── prompts/
 │       ├── __init__.py       # загрузка и валидация промптов
 │       └── system.yaml       # системный промпт агента
@@ -270,6 +270,7 @@ Telegram message
     → UUID-сессия текущего чата
     → LangGraph
     → OpenRouterProvider
+    → вызов выбранного моделью инструмента (если нужен)
     → преобразование Markdown
     → редактирование статусного сообщения финальным ответом
 ```

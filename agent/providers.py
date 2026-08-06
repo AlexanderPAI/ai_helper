@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol, Self
 
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 
 from .settings import OpenRouterSettings
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """Provider-independent request to invoke an agent tool."""
+
+    name: str
+    arguments: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class LLMResponse:
+    """Text and tool calls returned by an LLM provider."""
+
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
 
 
 class LLMProvider(Protocol):
@@ -18,13 +36,13 @@ class LLMProvider(Protocol):
         self,
         messages: Sequence[Mapping[str, Any]],
         **options: Any,
-    ) -> str: ...
+    ) -> LLMResponse: ...
 
     async def agenerate(
         self,
         messages: Sequence[Mapping[str, Any]],
         **options: Any,
-    ) -> str: ...
+    ) -> LLMResponse: ...
 
 
 class OpenRouterProvider(LLMProvider):
@@ -80,10 +98,9 @@ class OpenRouterProvider(LLMProvider):
         self,
         messages: Sequence[Mapping[str, Any]],
         **options: Any,
-    ) -> str:
-        """Return only the model text expected by the agent."""
-        completion = self.chat(messages, **options)
-        return completion.choices[0].message.content or ""
+    ) -> LLMResponse:
+        """Return a provider-independent model response."""
+        return self._build_response(self.chat(messages, **options))
 
     async def achat(
         self,
@@ -101,10 +118,30 @@ class OpenRouterProvider(LLMProvider):
         self,
         messages: Sequence[Mapping[str, Any]],
         **options: Any,
-    ) -> str:
-        """Asynchronously return only the model text expected by the agent."""
-        completion = await self.achat(messages, **options)
-        return completion.choices[0].message.content or ""
+    ) -> LLMResponse:
+        """Asynchronously return a provider-independent model response."""
+        return self._build_response(await self.achat(messages, **options))
+
+    @staticmethod
+    def _build_response(completion: ChatCompletion) -> LLMResponse:
+        message = completion.choices[0].message
+        tool_calls = tuple(
+            ToolCall(
+                name=tool_call.function.name,
+                arguments=OpenRouterProvider._load_tool_arguments(
+                    tool_call.function.arguments
+                ),
+            )
+            for tool_call in message.tool_calls or ()
+        )
+        return LLMResponse(content=message.content or "", tool_calls=tool_calls)
+
+    @staticmethod
+    def _load_tool_arguments(arguments: str) -> Mapping[str, Any]:
+        parsed = json.loads(arguments)
+        if not isinstance(parsed, dict):
+            raise TypeError("tool arguments must be a JSON object")
+        return parsed
 
     def close(self) -> None:
         """Close resources owned by the synchronous client."""
