@@ -16,7 +16,14 @@ from aiogram.types import Message, MessageEntity
 from openai import OpenAIError
 from telegramify_markdown import convert, split_entities
 
-from agent import Agent, OpenRouterProvider
+from agent import (
+    Agent,
+    AgentToolError,
+    HumorAPISettings,
+    MemeResult,
+    OpenRouterProvider,
+    SendMemeTool,
+)
 
 from .settings import TelegramSettings
 
@@ -108,15 +115,13 @@ class TelegramAgentBot:
             )
             try:
                 response = await self.agent.ainvoke(prompt, session_id=session_id)
-            except OpenAIError:
+            except OpenAIError, AgentToolError:
                 logger.exception(
                     "LLM request failed chat_id=%s after %.1fs",
                     message.chat.id,
                     monotonic() - started_at,
                 )
-                await status_message.edit_text(
-                    "❌ Не удалось получить ответ от модели."
-                )
+                await status_message.edit_text("❌ Не удалось подготовить ответ.")
                 return
             finally:
                 progress_task.cancel()
@@ -127,8 +132,18 @@ class TelegramAgentBot:
                 "LLM response received chat_id=%s after %.1fs characters=%d",
                 message.chat.id,
                 monotonic() - started_at,
-                len(response),
+                len(response) if isinstance(response, str) else 0,
             )
+            if isinstance(response, MemeResult):
+                await status_message.delete()
+                await message.answer_photo(response.url)
+                logger.info(
+                    "Meme sent chat_id=%s meme_id=%s total_time=%.1fs",
+                    message.chat.id,
+                    response.id,
+                    monotonic() - started_at,
+                )
+                return
             chunks_sent = await self._replace_status_with_response(
                 message,
                 status_message,
@@ -221,6 +236,7 @@ async def run_bot() -> None:
     """Build application services and start Telegram long polling."""
     logger.info("Loading bot configuration")
     settings = TelegramSettings()  # type: ignore[call-arg]
+    humor_api_settings = HumorAPISettings()  # type: ignore[call-arg]
     logger.info("Configuration loaded allowed_chats=%d", len(settings.chat_ids))
 
     async with (
@@ -233,7 +249,7 @@ async def run_bot() -> None:
             raise RuntimeError("Telegram bot must have a username")
 
         application = TelegramAgentBot(
-            agent=Agent(provider),
+            agent=Agent(provider, tools=(SendMemeTool(humor_api_settings),)),
             bot_username=bot_user.username,
             allowed_chat_ids=settings.chat_ids,
         )

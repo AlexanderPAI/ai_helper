@@ -2,39 +2,20 @@
 
 from __future__ import annotations
 
-import argparse
-import asyncio
-import sys
 from collections.abc import Mapping, Sequence
 from operator import add
-from typing import Annotated, Any, Protocol, TypedDict
+from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
 
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from openai import OpenAIError
-from pydantic import ValidationError
 
 from .prompts import load_system_prompt
+from .providers import LLMProvider, LLMResponse
+from .tools import AgentTool, MemeResult, ToolResult
 
 TELEGRAM_MESSAGE_LIMIT = 4096
-
-
-class LLMProvider(Protocol):
-    """Contract that any LLM provider used by :class:`Agent` must implement."""
-
-    def generate(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        **options: Any,
-    ) -> str: ...
-
-    async def agenerate(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        **options: Any,
-    ) -> str: ...
 
 
 Message = dict[str, str]
@@ -44,6 +25,7 @@ class AgentState(TypedDict):
     """Conversation history accumulated by the graph checkpointer."""
 
     messages: Annotated[list[Message], add]
+    output: ToolResult
 
 
 class Agent:
@@ -60,6 +42,7 @@ class Agent:
         session_id: UUID | None = None,
         max_response_length: int = TELEGRAM_MESSAGE_LIMIT,
         provider_options: Mapping[str, Any] | None = None,
+        tools: Sequence[AgentTool] = (),
     ) -> None:
         if max_response_length < 1:
             raise ValueError("max_response_length must be greater than zero")
@@ -70,6 +53,9 @@ class Agent:
         self.session_id = session_id or uuid4()
         self.max_response_length = max_response_length
         self.provider_options = dict(provider_options or {})
+        self.tools = {tool.name: tool for tool in tools}
+        if len(self.tools) != len(tools):
+            raise ValueError("tool names must be unique")
         self.system_prompt = load_system_prompt()
         self.checkpointer = InMemorySaver()
         self.graph = self._build_graph()
@@ -85,16 +71,75 @@ class Agent:
     def _call_provider(self, state: AgentState) -> AgentState:
         response = self.provider.generate(
             self._messages_for_provider(state),
-            **self.provider_options,
+            **self._provider_options(),
         )
-        return {"messages": [self._assistant_message(response)]}
+        output = self._response_output(response)
+        return {
+            "messages": [self._assistant_message(self._history_text(output))],
+            "output": output,
+        }
 
     async def _acall_provider(self, state: AgentState) -> AgentState:
         response = await self.provider.agenerate(
             self._messages_for_provider(state),
-            **self.provider_options,
+            **self._provider_options(),
         )
-        return {"messages": [self._assistant_message(response)]}
+        output = await self._aresponse_output(response)
+        return {
+            "messages": [self._assistant_message(self._history_text(output))],
+            "output": output,
+        }
+
+    def _provider_options(self) -> dict[str, Any]:
+        options = dict(self.provider_options)
+        if self.tools:
+            options["tools"] = [tool.schema for tool in self.tools.values()]
+            options["tool_choice"] = "auto"
+        return options
+
+    def _response_output(self, response: LLMResponse) -> ToolResult:
+        if not isinstance(response, LLMResponse):
+            raise TypeError("provider must return an LLMResponse")
+        if not response.tool_calls:
+            return response.content
+
+        results: list[ToolResult] = []
+        for tool_call in response.tool_calls:
+            try:
+                tool = self.tools[tool_call.name]
+            except KeyError as error:
+                raise ValueError(f"unknown tool requested: {tool_call.name}") from error
+            results.append(tool.invoke(tool_call.arguments))
+        return self._combine_tool_results(results)
+
+    async def _aresponse_output(self, response: LLMResponse) -> ToolResult:
+        if not isinstance(response, LLMResponse):
+            raise TypeError("provider must return an LLMResponse")
+        if not response.tool_calls:
+            return response.content
+
+        results = []
+        for tool_call in response.tool_calls:
+            try:
+                tool = self.tools[tool_call.name]
+            except KeyError as error:
+                raise ValueError(f"unknown tool requested: {tool_call.name}") from error
+            results.append(await tool.ainvoke(tool_call.arguments))
+        return self._combine_tool_results(results)
+
+    @staticmethod
+    def _combine_tool_results(results: list[ToolResult]) -> ToolResult:
+        if len(results) == 1:
+            return results[0]
+        if any(isinstance(result, MemeResult) for result in results):
+            raise ValueError("image tools cannot be combined with other tool calls")
+        return "\n".join(results)
+
+    @staticmethod
+    def _history_text(output: ToolResult) -> str:
+        if isinstance(output, MemeResult):
+            return f"[Отправлен мем Humor API, id={output.id}]"
+        return output
 
     def _messages_for_provider(self, state: AgentState) -> list[Message]:
         return [
@@ -121,21 +166,23 @@ class Agent:
             raise TypeError("session_id must be a UUID")
         return str(resolved_session_id)
 
-    def invoke(self, prompt: str, *, session_id: UUID | None = None) -> str:
+    def invoke(self, prompt: str, *, session_id: UUID | None = None) -> ToolResult:
         """Send a prompt within a session and return a size-limited response."""
         result = self.graph.invoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=self._config(session_id),
         )
-        return result["messages"][-1]["content"]
+        return result["output"]
 
-    async def ainvoke(self, prompt: str, *, session_id: UUID | None = None) -> str:
+    async def ainvoke(
+        self, prompt: str, *, session_id: UUID | None = None
+    ) -> ToolResult:
         """Asynchronously send a prompt within a session."""
         result = await self.graph.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=self._config(session_id),
         )
-        return result["messages"][-1]["content"]
+        return result["output"]
 
     def reset_context(self, *, session_id: UUID | None = None) -> None:
         """Delete all stored messages for one dialog session."""
@@ -144,59 +191,3 @@ class Agent:
     async def areset_context(self, *, session_id: UUID | None = None) -> None:
         """Asynchronously delete all stored messages for one dialog session."""
         await self.checkpointer.adelete_thread(self._thread_id(session_id))
-
-
-async def _run_console(session_id: UUID | None = None) -> None:
-    """Run an interactive console dialog using the configured provider."""
-    from .providers import OpenRouterProvider
-
-    async with OpenRouterProvider() as provider:
-        agent = Agent(provider, session_id=session_id)
-
-        print(f"Session: {agent.session_id}")
-        print("Commands: /reset — reset context, /exit — exit")
-
-        while True:
-            try:
-                prompt = await asyncio.to_thread(input, "You: ")
-            except EOFError, KeyboardInterrupt:
-                print()
-                break
-
-            prompt = prompt.strip()
-            if not prompt:
-                continue
-            if prompt in {"/exit", "/quit"}:
-                break
-            if prompt == "/reset":
-                await agent.areset_context()
-                print("Context reset.")
-                continue
-
-            try:
-                response = await agent.ainvoke(prompt)
-            except OpenAIError as error:
-                print(f"Error: {error}")
-                continue
-
-            print(f"Agent: {response}")
-
-
-def main() -> None:
-    """Parse command-line arguments and start the interactive agent."""
-    parser = argparse.ArgumentParser(description="Run the agent in the console")
-    parser.add_argument(
-        "--session-id",
-        type=UUID,
-        help="UUID to use for this conversation (a new UUID is created by default)",
-    )
-    arguments = parser.parse_args()
-    try:
-        asyncio.run(_run_console(arguments.session_id))
-    except ValidationError as error:
-        print(f"Failed to start agent: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
-
-
-if __name__ == "__main__":
-    main()
