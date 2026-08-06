@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from .providers import OpenRouterProvider
+from .providers import LLMProvider, OpenRouterProvider
 from .settings import OpenRouterSettings
 
 __all__ = [
@@ -16,12 +16,11 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     """Load agent classes lazily so ``python -m agent.agent`` runs cleanly."""
-    if name in {"Agent", "LLMProvider", "TELEGRAM_MESSAGE_LIMIT"}:
-        from .agent import TELEGRAM_MESSAGE_LIMIT, Agent, LLMProvider
+    if name in {"Agent", "TELEGRAM_MESSAGE_LIMIT"}:
+        from .agent import TELEGRAM_MESSAGE_LIMIT, Agent
 
         exports = {
             "Agent": Agent,
-            "LLMProvider": LLMProvider,
             "TELEGRAM_MESSAGE_LIMIT": TELEGRAM_MESSAGE_LIMIT,
         }
         return exports[name]

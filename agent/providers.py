@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Self
+from typing import Any, Protocol, Self
 
 from openai import AsyncOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
@@ -11,7 +11,23 @@ from openai.types.chat import ChatCompletion
 from .settings import OpenRouterSettings
 
 
-class OpenRouterProvider:
+class LLMProvider(Protocol):
+    """Contract implemented by LLM providers used by the agent."""
+
+    def generate(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        **options: Any,
+    ) -> str: ...
+
+    async def agenerate(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        **options: Any,
+    ) -> str: ...
+
+
+class OpenRouterProvider(LLMProvider):
     """Service for accessing models through the OpenRouter API.
 
     Configuration can be passed explicitly or read from these environment

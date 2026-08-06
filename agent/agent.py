@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from operator import add
-from typing import Annotated, Any, Protocol, TypedDict
+from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
 
 from langchain_core.runnables import RunnableLambda
@@ -12,24 +12,9 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .prompts import load_system_prompt
+from .providers import LLMProvider
 
 TELEGRAM_MESSAGE_LIMIT = 4096
-
-
-class LLMProvider(Protocol):
-    """Contract that any LLM provider used by :class:`Agent` must implement."""
-
-    def generate(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        **options: Any,
-    ) -> str: ...
-
-    async def agenerate(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        **options: Any,
-    ) -> str: ...
 
 
 Message = dict[str, str]
