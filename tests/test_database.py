@@ -70,6 +70,10 @@ class MigratedPostgreSQLSchemaTest(unittest.IsolatedAsyncioTestCase):
             schema["reminder_indexes"],
         )
         self.assertIn(
+            "ix_event_reminders_status_locked_at",
+            schema["reminder_indexes"],
+        )
+        self.assertIn(
             "ux_event_reminders_event_remind_at_open",
             schema["reminder_indexes"],
         )

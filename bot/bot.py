@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
+from contextlib import suppress
 from datetime import UTC, datetime
 from time import monotonic
+from uuid import uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import MessageEntityType
@@ -26,15 +30,18 @@ from calendar_app import CalendarService
 from database import (
     DatabaseSettings,
     SqlAlchemyCalendarUnitOfWorkFactory,
+    SqlAlchemyReminderUnitOfWorkFactory,
     create_database_engine,
     create_session_factory,
 )
+from reminder_app import ReminderWorker
 
 from .progress import TelegramProgressReporter
 from .prompts import load_system_prompt
+from .reminders import TelegramReminderSender
 from .rendering import TelegramResponseRenderer
 from .sessions import ChatSessionRegistry
-from .settings import TelegramSettings
+from .settings import ReminderWorkerSettings, TelegramSettings
 
 logger = logging.getLogger(__name__)
 
@@ -192,11 +199,15 @@ async def run_bot() -> None:
     settings = TelegramSettings()  # type: ignore[call-arg]
     humor_api_settings = HumorAPISettings()  # type: ignore[call-arg]
     database_settings = DatabaseSettings()  # type: ignore[call-arg]
+    reminder_settings = ReminderWorkerSettings()
     logger.info("Configuration loaded allowed_chats=%d", len(settings.chat_ids))
 
     database_engine = create_database_engine(database_settings)
     calendar_service = CalendarService(
         SqlAlchemyCalendarUnitOfWorkFactory(create_session_factory(database_engine))
+    )
+    reminder_unit_of_work_factory = SqlAlchemyReminderUnitOfWorkFactory(
+        create_session_factory(database_engine)
     )
     try:
         async with (
@@ -208,29 +219,51 @@ async def run_bot() -> None:
             if bot_user.username is None:
                 raise RuntimeError("Telegram bot must have a username")
 
-            application = TelegramAgentBot(
-                agent=Agent(
-                    provider,
-                    additional_system_prompts=(load_system_prompt(),),
-                    tools=(
-                        SendMemeTool(humor_api_settings),
-                        *calendar_tools(calendar_service),
+            reminder_worker = ReminderWorker(
+                reminder_unit_of_work_factory,
+                TelegramReminderSender(telegram_bot),
+                worker_id=(f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"),
+                options=reminder_settings.worker_options,
+            )
+            reminder_task = asyncio.create_task(
+                reminder_worker.run(), name="reminder-worker"
+            )
+            try:
+                application = TelegramAgentBot(
+                    agent=Agent(
+                        provider,
+                        additional_system_prompts=(load_system_prompt(),),
+                        tools=(
+                            SendMemeTool(humor_api_settings),
+                            *calendar_tools(calendar_service),
+                        ),
                     ),
-                ),
-                bot_username=bot_user.username,
-                allowed_chat_ids=settings.chat_ids,
-                calendar_service=calendar_service,
-                calendar_default_timezone=settings.calendar_default_timezone,
-            )
-            dispatcher = Dispatcher()
-            application.register(dispatcher)
+                    bot_username=bot_user.username,
+                    allowed_chat_ids=settings.chat_ids,
+                    calendar_service=calendar_service,
+                    calendar_default_timezone=settings.calendar_default_timezone,
+                )
+                dispatcher = Dispatcher()
+                application.register(dispatcher)
 
-            logger.info(
-                "Starting @%s in %d allowed chats",
-                bot_user.username,
-                len(settings.chat_ids),
-            )
-            await dispatcher.start_polling(telegram_bot)
+                logger.info(
+                    "Starting @%s in %d allowed chats",
+                    bot_user.username,
+                    len(settings.chat_ids),
+                )
+                await dispatcher.start_polling(telegram_bot)
+            finally:
+                reminder_worker.request_stop()
+                try:
+                    await asyncio.wait_for(
+                        reminder_task,
+                        timeout=reminder_settings.shutdown_timeout,
+                    )
+                except TimeoutError:
+                    logger.warning("Reminder worker graceful shutdown timed out")
+                    reminder_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await reminder_task
     finally:
         await database_engine.dispose()
 

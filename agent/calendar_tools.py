@@ -534,21 +534,44 @@ def _event_result(operation: str, event: CalendarEvent) -> StructuredToolResult:
 def _list_result(
     events: Sequence[CalendarEvent], timezone: str
 ) -> StructuredToolResult:
-    if not events:
+    ordered_events = sorted(events, key=lambda event: event.starts_at)
+    if not ordered_events:
         markdown = "В календаре этого чата нет событий за выбранный период."
     else:
-        lines = ["## 📅 События календаря", ""]
-        for event in events:
+        lines = ["## 📅 Ближайшие события", ""]
+        for position, event in enumerate(ordered_events, start=1):
             local = event.starts_at.astimezone(ZoneInfo(timezone))
-            lines.extend(
+            lines.extend((f"### {position}. {_escape(event.title)}", ""))
+            lines.append(f"🗓 **Когда:** {local:%d.%m.%Y в %H:%M}")
+            lines.append(f"🌍 **Часовой пояс:** {_escape(timezone)}")
+            if event.description:
+                lines.append(f"📝 **Описание:** {_escape(event.description)}")
+
+            open_reminders = sorted(
                 (
-                    (
-                        f"- {_escape(event.title)} — {local:%d.%m.%Y %H:%M} "
-                        f"({_escape(timezone)})"
-                    ),
-                    f"  ID: `{event.id}`, версия: `{event.version}`",
-                )
+                    reminder
+                    for reminder in event.reminders
+                    if reminder.status
+                    in (
+                        CalendarReminderStatus.PENDING,
+                        CalendarReminderStatus.PROCESSING,
+                    )
+                ),
+                key=lambda reminder: reminder.remind_at,
             )
+            if open_reminders:
+                lines.extend(("", "🔔 **Напоминания:**"))
+                for reminder in open_reminders:
+                    reminder_local = reminder.remind_at.astimezone(ZoneInfo(timezone))
+                    lines.append(
+                        f"- {reminder_local:%d.%m.%Y в %H:%M} — "
+                        f"{_escape(reminder.message_text)}"
+                    )
+            else:
+                lines.extend(("", "🔕 Напоминания не установлены"))
+
+            if position < len(ordered_events):
+                lines.extend(("", "---", ""))
         markdown = "\n".join(lines)
     return StructuredToolResult(
         kind="calendar_events_listed",
@@ -556,7 +579,7 @@ def _list_result(
         data={
             "operation": "listed",
             "timezone": timezone,
-            "events": [_event_data(event) for event in events],
+            "events": [_event_data(event) for event in ordered_events],
         },
     )
 

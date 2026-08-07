@@ -121,6 +121,11 @@ class EventReminder(TimestampMixin, Base):
             "status",
             "next_attempt_at",
         ),
+        Index(
+            "ix_event_reminders_status_locked_at",
+            "status",
+            "locked_at",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

@@ -22,6 +22,7 @@ RUN poetry install --only main --no-root --no-ansi \
 COPY --chown=app:app agent ./agent
 COPY --chown=app:app bot ./bot
 COPY --chown=app:app calendar_app ./calendar_app
+COPY --chown=app:app reminder_app ./reminder_app
 COPY --chown=app:app database ./database
 COPY --chown=app:app config.py ./config.py
 COPY --chown=app:app migrations ./migrations

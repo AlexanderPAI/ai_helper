@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -133,12 +134,17 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(str(saved.id), result.markdown)
         self.assertIn("Версия: `1`", result.markdown)
 
-    async def test_list_defaults_to_runtime_now_and_returns_structured_events(
+    async def test_list_is_chronological_and_hides_internal_fields_from_user(
         self,
     ) -> None:
         service = Mock()
-        saved = event()
-        service.list_events = AsyncMock(return_value=[saved])
+        later = event(version=7)
+        sooner = replace(
+            event(version=3),
+            title="Завтрак",
+            starts_at=datetime(2026, 8, 8, 10, 0, tzinfo=UTC),
+        )
+        service.list_events = AsyncMock(return_value=[later, sooner])
         tool = ListCalendarEventsTool(service)
 
         result = await tool.ainvoke({}, context=runtime_context())
@@ -146,8 +152,15 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.list_events.await_args.args[0], -100123)
         self.assertEqual(service.list_events.await_args.kwargs["starts_from"], NOW)
         self.assertEqual(result.kind, "calendar_events_listed")
-        self.assertEqual(result.data["events"][0]["id"], str(saved.id))
-        self.assertIn("версия: `1`", result.markdown)
+        self.assertEqual(result.data["events"][0]["id"], str(sooner.id))
+        self.assertLess(
+            result.markdown.index("Завтрак"),
+            result.markdown.index("Встреча по договору"),
+        )
+        self.assertIn("📝 **Описание:** Продление договора", result.markdown)
+        self.assertIn("🔔 **Напоминания:**", result.markdown)
+        self.assertNotIn("ID:", result.markdown)
+        self.assertNotIn("версия", result.markdown.casefold())
 
     async def test_get_update_and_cancel_are_scoped_to_runtime_chat(self) -> None:
         service = Mock()

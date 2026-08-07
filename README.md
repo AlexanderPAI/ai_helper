@@ -120,6 +120,16 @@ DATABASE_URL=postgresql+asyncpg://ai_helper:replace-with-a-strong-password@postg
 DATABASE_POOL_SIZE=5
 DATABASE_MAX_OVERFLOW=5
 DATABASE_POOL_TIMEOUT=30
+
+# Reminder worker
+REMINDER_POLL_INTERVAL=10
+REMINDER_BATCH_SIZE=20
+REMINDER_LEASE_TIMEOUT_SECONDS=300
+REMINDER_MAX_ATTEMPTS=5
+REMINDER_RETRY_BASE_DELAY_SECONDS=30
+REMINDER_RETRY_MAX_DELAY_SECONDS=3600
+REMINDER_RETRY_JITTER_RATIO=0.1
+REMINDER_SHUTDOWN_TIMEOUT=30
 ```
 
 `POSTGRES_*` используются контейнером PostgreSQL при первичной инициализации,
@@ -130,6 +140,11 @@ DATABASE_POOL_TIMEOUT=30
 `TELEGRAM_CALENDAR_DEFAULT_TIMEZONE` — IANA-таймзона для чата, пока у него нет
 сохранённой настройки календаря. После первого календарного действия настройка
 чата хранится в PostgreSQL и не зависит от контекста LangGraph.
+
+Параметры `REMINDER_*` управляют встроенным worker-ом: частотой опроса, размером
+пачки, временем lease, количеством попыток, backoff и временем graceful shutdown.
+Worker использует PostgreSQL как источник истины и после перезапуска восстанавливает
+зависшие доставки по истечении lease.
 
 ### Разрешённые чаты
 
@@ -168,6 +183,11 @@ Compose запускает отдельный PostgreSQL-контейнер с �
 публиковать порты приложения и PostgreSQL не нужно. Compose передаёт переменные
 из `.env` внутрь контейнеров. Сам `.env` исключён из контекста сборки через
 `.dockerignore` и не попадает в Docker-образ.
+
+Worker напоминаний запускается внутри процесса бота отдельной фоновой задачей. Он
+не зависит от активного диалога или контекста LangGraph: сообщение формируется из
+сохранённых события и `message_text`, после чего отправляется напрямую через
+Telegram Bot API.
 
 Просмотр логов в реальном времени:
 
