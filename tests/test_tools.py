@@ -9,8 +9,9 @@ from urllib.parse import parse_qs, urlparse
 
 from pydantic import AnyHttpUrl, SecretStr
 
+from agent.results import MediaResult
 from agent.settings import HumorAPISettings
-from agent.tools import MemeResult, SendMemeTool
+from agent.tools import SendMemeTool
 
 
 class _Response(BytesIO):
@@ -53,7 +54,7 @@ class SendMemeToolTest(unittest.TestCase):
 
         self.assertEqual(
             result,
-            MemeResult(42, "https://images.example.test/meme.jpg", "image/jpeg"),
+            MediaResult(42, "https://images.example.test/meme.jpg", "image/jpeg"),
         )
         request = mock_urlopen.call_args.args[0]
         self.assertEqual(

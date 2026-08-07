@@ -13,7 +13,8 @@ from langgraph.graph import END, START, StateGraph
 
 from .prompts import load_system_prompt
 from .providers import LLMProvider, LLMResponse
-from .tools import AgentTool, MemeResult, ToolResult
+from .results import MediaResult, ToolResult
+from .tools import AgentTool
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -131,14 +132,14 @@ class Agent:
     def _combine_tool_results(results: list[ToolResult]) -> ToolResult:
         if len(results) == 1:
             return results[0]
-        if any(isinstance(result, MemeResult) for result in results):
-            raise ValueError("image tools cannot be combined with other tool calls")
+        if any(isinstance(result, MediaResult) for result in results):
+            raise ValueError("media tools cannot be combined with other tool calls")
         return "\n".join(results)
 
     @staticmethod
     def _history_text(output: ToolResult) -> str:
-        if isinstance(output, MemeResult):
-            return f"[Отправлен мем Humor API, id={output.id}]"
+        if isinstance(output, MediaResult):
+            return f"[Отправлен медиафайл, id={output.id}]"
         return output
 
     def _messages_for_provider(self, state: AgentState) -> list[Message]:

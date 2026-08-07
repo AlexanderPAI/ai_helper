@@ -9,8 +9,9 @@ from .providers import (
     OpenRouterProvider,
     ToolCall,
 )
+from .results import MediaResult, ToolResult
 from .settings import HumorAPISettings, OpenRouterSettings
-from .tools import AgentTool, AgentToolError, MemeResult, SendMemeTool
+from .tools import AgentTool, AgentToolError, SendMemeTool
 
 __all__ = [
     "TELEGRAM_MESSAGE_LIMIT",
@@ -21,11 +22,12 @@ __all__ = [
     "LLMProvider",
     "LLMProviderError",
     "LLMResponse",
-    "MemeResult",
+    "MediaResult",
     "OpenRouterProvider",
     "OpenRouterSettings",
     "SendMemeTool",
     "ToolCall",
+    "ToolResult",
 ]
 
 

@@ -7,12 +7,12 @@ import json
 import logging
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .results import MediaResult, ToolResult
 from .settings import HumorAPISettings
 
 logger = logging.getLogger(__name__)
@@ -24,18 +24,6 @@ class AgentToolError(RuntimeError):
 
 class EmptyMemeSearchError(AgentToolError):
     """Raised internally when a valid meme search has no results."""
-
-
-@dataclass(frozen=True, slots=True)
-class MemeResult:
-    """A ready-to-send meme returned by a meme provider."""
-
-    id: int
-    url: str
-    media_type: str
-
-
-ToolResult = str | MemeResult
 
 
 class AgentTool(Protocol):
@@ -107,7 +95,7 @@ class SendMemeTool:
             },
         }
 
-    def invoke(self, arguments: Mapping[str, Any]) -> MemeResult:
+    def invoke(self, arguments: Mapping[str, Any]) -> MediaResult:
         """Fetch exactly one meme using the mode selected by the agent."""
         mode, keywords = self._parse_arguments(arguments)
         payload = self._request(mode, keywords)
@@ -151,7 +139,7 @@ class SendMemeTool:
 
         return payload
 
-    async def ainvoke(self, arguments: Mapping[str, Any]) -> MemeResult:
+    async def ainvoke(self, arguments: Mapping[str, Any]) -> MediaResult:
         """Fetch one meme without blocking the agent event loop."""
         return await asyncio.to_thread(self.invoke, arguments)
 
@@ -183,7 +171,7 @@ class SendMemeTool:
         return mode, keywords
 
     @staticmethod
-    def _parse_response(payload: Any, mode: Literal["random", "search"]) -> MemeResult:
+    def _parse_response(payload: Any, mode: Literal["random", "search"]) -> MediaResult:
         if not isinstance(payload, dict):
             raise AgentToolError("Humor API returned an invalid response")
 
@@ -209,4 +197,4 @@ class SendMemeTool:
             or not media_type.startswith("image/")
         ):
             raise AgentToolError("Humor API returned an invalid meme")
-        return MemeResult(id=meme_id, url=url, media_type=media_type)
+        return MediaResult(id=meme_id, url=url, media_type=media_type)

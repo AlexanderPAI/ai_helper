@@ -20,7 +20,7 @@ from agent import (
     AgentToolError,
     HumorAPISettings,
     LLMProviderError,
-    MemeResult,
+    MediaResult,
     OpenRouterProvider,
     SendMemeTool,
 )
@@ -134,13 +134,14 @@ class TelegramAgentBot:
                 monotonic() - started_at,
                 len(response) if isinstance(response, str) else 0,
             )
-            if isinstance(response, MemeResult):
+            if isinstance(response, MediaResult):
                 await status_message.delete()
                 await message.answer_photo(response.url)
                 logger.info(
-                    "Meme sent chat_id=%s meme_id=%s total_time=%.1fs",
+                    "Media sent chat_id=%s media_id=%s media_type=%s total_time=%.1fs",
                     message.chat.id,
                     response.id,
+                    response.media_type,
                     monotonic() - started_at,
                 )
                 return
