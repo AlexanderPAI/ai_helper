@@ -8,8 +8,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from .domain import (
     UNSET,
     CalendarEvent,
@@ -21,7 +19,7 @@ from .domain import (
     UpdateEvent,
 )
 from .errors import CalendarNotFoundError, CalendarValidationError
-from .repository import CalendarRepository
+from .repository import CalendarUnitOfWorkFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,25 +36,25 @@ class CalendarService:
 
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession],
+        unit_of_work_factory: CalendarUnitOfWorkFactory,
         *,
         options: CalendarServiceOptions | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        self.session_factory = session_factory
+        self.unit_of_work_factory = unit_of_work_factory
         self.options = options or CalendarServiceOptions()
         self._now = now or (lambda: datetime.now(UTC))
 
     async def get_settings(self, chat_id: int) -> CalendarSettings | None:
         self._validate_chat_id(chat_id)
-        async with self.session_factory() as session:
-            return await CalendarRepository(session).get_settings(chat_id)
+        async with self.unit_of_work_factory() as unit_of_work:
+            return await unit_of_work.repository.get_settings(chat_id)
 
     async def set_timezone(self, chat_id: int, timezone: str) -> CalendarSettings:
         self._validate_chat_id(chat_id)
         timezone = self._timezone(timezone).key
-        async with self.session_factory() as session, session.begin():
-            repository = CalendarRepository(session)
+        async with self.unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.repository
             current = await repository.get_settings(chat_id)
             if current is None:
                 return await repository.ensure_settings(chat_id, timezone)
@@ -78,8 +76,8 @@ class CalendarService:
         reminder_rows = self._reminder_rows(starts_at, request.reminders, now)
         event_id = uuid4()
 
-        async with self.session_factory() as session, session.begin():
-            repository = CalendarRepository(session)
+        async with self.unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.repository
             await repository.ensure_settings(request.chat_id, timezone.key)
             return await repository.create_event(
                 event_id=event_id,
@@ -97,8 +95,8 @@ class CalendarService:
 
     async def get_event(self, chat_id: int, event_id: UUID) -> CalendarEvent:
         self._validate_chat_id(chat_id)
-        async with self.session_factory() as session:
-            event = await CalendarRepository(session).get_event(chat_id, event_id)
+        async with self.unit_of_work_factory() as unit_of_work:
+            event = await unit_of_work.repository.get_event(chat_id, event_id)
         if event is None:
             raise CalendarNotFoundError("event not found in this chat")
         return event
@@ -128,8 +126,8 @@ class CalendarService:
         ):
             raise CalendarValidationError("starts_from must be before starts_until")
 
-        async with self.session_factory() as session:
-            return await CalendarRepository(session).list_events(
+        async with self.unit_of_work_factory() as unit_of_work:
+            return await unit_of_work.repository.list_events(
                 chat_id,
                 starts_from=normalized_from,
                 starts_until=normalized_until,
@@ -143,8 +141,8 @@ class CalendarService:
             raise CalendarValidationError("expected_version must be positive")
         now = self._utc_now()
 
-        async with self.session_factory() as session, session.begin():
-            repository = CalendarRepository(session)
+        async with self.unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.repository
             current = await repository.get_event(request.chat_id, request.event_id)
             if current is None:
                 raise CalendarNotFoundError("event not found in this chat")
@@ -219,8 +217,8 @@ class CalendarService:
             raise CalendarValidationError("expected_version must be positive")
         now = self._utc_now()
 
-        async with self.session_factory() as session, session.begin():
-            repository = CalendarRepository(session)
+        async with self.unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.repository
             current = await repository.get_event(chat_id, event_id)
             if current is None:
                 raise CalendarNotFoundError("event not found in this chat")

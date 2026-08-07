@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 import unittest
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Never
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from calendar_app import (
     CalendarConflictError,
@@ -15,11 +15,13 @@ from calendar_app import (
     CalendarNotFoundError,
     CalendarReminderStatus,
     CalendarService,
+    CalendarUnitOfWorkFactory,
     CalendarValidationError,
     CreateEvent,
     ReminderDraft,
     UpdateEvent,
 )
+from database.calendar import SqlAlchemyCalendarUnitOfWorkFactory
 from database.models import CalendarChat, CalendarEvent, EventReminder
 
 FIXED_NOW = datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
@@ -33,7 +35,7 @@ def local_datetime(year: int, month: int, day: int, hour: int, minute: int) -> d
 class CalendarBusinessRulesTest(unittest.IsolatedAsyncioTestCase):
     def service(self, now: datetime = FIXED_NOW) -> CalendarService:
         return CalendarService(
-            cast(async_sessionmaker[AsyncSession], _ForbiddenSessionFactory()),
+            _forbidden_unit_of_work_factory,
             now=lambda: now,
         )
 
@@ -95,9 +97,14 @@ class CalendarBusinessRulesTest(unittest.IsolatedAsyncioTestCase):
             )
 
 
-class _ForbiddenSessionFactory:
-    def __call__(self) -> None:
-        raise AssertionError("validation should finish before opening a DB session")
+class _ForbiddenUnitOfWorkFactory:
+    def __call__(self) -> Never:
+        raise AssertionError("validation should finish before opening a unit of work")
+
+
+_forbidden_unit_of_work_factory: CalendarUnitOfWorkFactory = (
+    _ForbiddenUnitOfWorkFactory()
+)
 
 
 @unittest.skipUnless(
@@ -108,7 +115,9 @@ class CalendarServicePostgreSQLTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.engine = create_async_engine(os.environ["DATABASE_TEST_URL"])
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
-        self.service = CalendarService(self.sessions, now=lambda: FIXED_NOW)
+        self.service = CalendarService(
+            SqlAlchemyCalendarUnitOfWorkFactory(self.sessions), now=lambda: FIXED_NOW
+        )
         self.chat_id = -(uuid4().int % 9_000_000_000 + 1)
 
     async def asyncTearDown(self) -> None:

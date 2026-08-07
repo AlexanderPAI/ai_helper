@@ -17,7 +17,11 @@ from .errors import (
     CalendarNotFoundError,
     CalendarValidationError,
 )
-from .repository import CalendarRepository
+from .repository import (
+    CalendarRepository,
+    CalendarUnitOfWork,
+    CalendarUnitOfWorkFactory,
+)
 from .service import CalendarService, CalendarServiceOptions
 
 __all__ = [
@@ -33,6 +37,8 @@ __all__ = [
     "CalendarService",
     "CalendarServiceOptions",
     "CalendarSettings",
+    "CalendarUnitOfWork",
+    "CalendarUnitOfWorkFactory",
     "CalendarValidationError",
     "CreateEvent",
     "ReminderDraft",
