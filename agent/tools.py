@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .prompts import ToolPrompt, load_tool_prompt
 from .results import MediaResult, ToolResult
 from .settings import HumorAPISettings
 
@@ -44,18 +45,15 @@ class SendMemeTool:
     """Fetch a contextually appropriate ready-made meme from Humor API."""
 
     name = "send_meme"
-    description = (
-        "Отправить в чат готовый мем через Humor API. Если пользователь просит "
-        "просто любой мем и не называет тему, ОБЯЗАТЕЛЬНО используй mode=random "
-        "без keywords. Используй mode=search только при наличии конкретной темы. "
-        "Для search ОБЯЗАТЕЛЬНО переведи тему пользователя на английский и передай "
-        "ровно одно широкое английское ключевое слово в keywords. Никогда не "
-        "передавай русские слова или несколько слов в "
-        "keywords. Не вызывай инструмент без уместного повода."
-    )
 
     def __init__(self, settings: HumorAPISettings) -> None:
         self.settings = settings
+        self.prompt: ToolPrompt = load_tool_prompt(self.name)
+
+    @property
+    def description(self) -> str:
+        """Return the model-facing tool description loaded from YAML."""
+        return self.prompt.description
 
     @property
     def schema(self) -> Mapping[str, Any]:
@@ -70,23 +68,16 @@ class SendMemeTool:
                         "mode": {
                             "type": "string",
                             "enum": ["random", "search"],
-                            "description": (
-                                "Используй random для просьбы прислать любой мем "
-                                "без указанной темы. Используй search только для "
-                                "явно указанной темы"
-                            ),
+                            "description": self.prompt.parameter_descriptions["mode"],
                         },
                         "keywords": {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 50,
                             "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-                            "description": (
-                                "Ровно одно широкое английское ключевое слово. "
-                                "Сам переведи сюда тему пользователя с любого "
-                                "языка. Обязательно для search и не передаётся "
-                                "для random"
-                            ),
+                            "description": self.prompt.parameter_descriptions[
+                                "keywords"
+                            ],
                         },
                     },
                     "required": ["mode"],

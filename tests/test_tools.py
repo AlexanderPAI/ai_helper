@@ -32,6 +32,20 @@ class SendMemeToolTest(unittest.TestCase):
         )
         self.tool = SendMemeTool(settings)
 
+    def test_model_instructions_are_loaded_from_yaml(self) -> None:
+        schema = self.tool.schema["function"]
+
+        self.assertEqual(schema["description"], self.tool.prompt.description)
+        properties = schema["parameters"]["properties"]
+        self.assertEqual(
+            properties["mode"]["description"],
+            self.tool.prompt.parameter_descriptions["mode"],
+        )
+        self.assertEqual(
+            properties["keywords"]["description"],
+            self.tool.prompt.parameter_descriptions["keywords"],
+        )
+
     @patch("agent.tools.urlopen")
     def test_search_uses_agent_keywords_and_requests_one_result(
         self, mock_urlopen
