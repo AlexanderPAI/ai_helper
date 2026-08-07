@@ -9,11 +9,15 @@ readme = "README.md"
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "aiogram (>=3.20.0,<4.0.0)",
+    "alembic (>=1.16.0,<2.0.0)",
+    "asyncpg (>=0.30.0,<1.0.0)",
+    "greenlet (>=3.2.0,<4.0.0)",
     "langgraph (>=1.0.0,<2.0.0)",
     "openai (>=2.0.0,<3.0.0)",
     "pre-commit (>=4.6.1,<5.0.0)",
     "pyyaml (>=6.0.0,<7.0.0)",
     "pydantic-settings (>=2.0.0,<3.0.0)",
+    "sqlalchemy[asyncio] (>=2.0.0,<3.0.0)",
     "telegramify-markdown (>=0.5.2,<2.0.0)"
 ]
 

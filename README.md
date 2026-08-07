@@ -110,7 +110,21 @@ HUMOR_API_USER_AGENT=ai-helper/0.1
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890,123456789
+
+# PostgreSQL
+POSTGRES_DB=ai_helper
+POSTGRES_USER=ai_helper
+POSTGRES_PASSWORD=replace-with-a-strong-password
+DATABASE_URL=postgresql+asyncpg://ai_helper:replace-with-a-strong-password@postgres:5432/ai_helper
+DATABASE_POOL_SIZE=5
+DATABASE_MAX_OVERFLOW=5
+DATABASE_POOL_TIMEOUT=30
 ```
+
+`POSTGRES_*` используются контейнером PostgreSQL при первичной инициализации,
+а `DATABASE_*` — приложением и Alembic. Пароль в `DATABASE_URL` должен совпадать
+с `POSTGRES_PASSWORD`. Если пароль содержит специальные символы URL, их нужно
+закодировать.
 
 ### Разрешённые чаты
 
@@ -143,9 +157,12 @@ venv/bin/python -m bot
 docker compose up --build -d
 ```
 
-Бот работает через long polling, поэтому публиковать порты контейнера не нужно.
-Compose передаёт переменные из `.env` внутрь контейнера. Сам `.env` исключён из
-контекста сборки через `.dockerignore` и не попадает в Docker-образ.
+Compose запускает отдельный PostgreSQL-контейнер с постоянным именованным volume,
+дожидается готовности БД, применяет миграции Alembic одноразовым сервисом
+`migrate` и только затем запускает бота. Бот работает через long polling, поэтому
+публиковать порты приложения и PostgreSQL не нужно. Compose передаёт переменные
+из `.env` внутрь контейнеров. Сам `.env` исключён из контекста сборки через
+`.dockerignore` и не попадает в Docker-образ.
 
 Просмотр логов в реальном времени:
 
@@ -165,10 +182,57 @@ docker compose ps
 docker compose down
 ```
 
+Эта команда сохраняет PostgreSQL volume. Для удаления данных БД требуется явно
+добавить `--volumes`; используйте это только если данные действительно больше не
+нужны.
+
 После изменения исходного кода или зависимостей пересоберите образ:
 
 ```bash
 docker compose up --build -d
+```
+
+### Миграции PostgreSQL
+
+При обычном запуске Compose миграции применяются автоматически сервисом
+`migrate`. Локально их можно запустить из существующего `venv`, указав доступный
+с хоста адрес PostgreSQL в `DATABASE_URL`:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://user:password@127.0.0.1:5432/database \
+  venv/bin/python -m alembic upgrade head
+```
+
+Текущая ревизия и история:
+
+```bash
+venv/bin/python -m alembic current
+venv/bin/python -m alembic history
+```
+
+### Тестовая PostgreSQL-среда
+
+Тестовая БД запускается отдельно, использует порт `55432` только на localhost и
+хранит данные в `tmpfs`. Она не использует production volume:
+
+```bash
+docker compose -f docker-compose.test.yaml up -d --wait
+```
+
+Применение миграций и запуск всех тестов с проверкой реальной схемы:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://ai_helper_test:ai_helper_test@127.0.0.1:55432/ai_helper_test \
+  venv/bin/python -m alembic upgrade head
+
+DATABASE_TEST_URL=postgresql+asyncpg://ai_helper_test:ai_helper_test@127.0.0.1:55432/ai_helper_test \
+  venv/bin/python -m unittest discover -v
+```
+
+Остановка и удаление тестовой среды:
+
+```bash
+docker compose -f docker-compose.test.yaml down
 ```
 
 Контейнер запускается от непривилегированного пользователя и автоматически

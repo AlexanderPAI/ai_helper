@@ -3,7 +3,7 @@
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from agent.settings import PROJECT_ROOT
+from config import PROJECT_ROOT
 
 
 class TelegramSettings(BaseSettings):
