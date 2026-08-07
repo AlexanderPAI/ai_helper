@@ -1,6 +1,8 @@
 """Provider- and tool-independent results returned by the agent."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,7 +14,16 @@ class MediaResult:
     media_type: str
 
 
-ToolResult = str | MediaResult
+@dataclass(frozen=True, slots=True)
+class StructuredToolResult:
+    """Machine-readable tool result with deterministic user-facing Markdown."""
+
+    kind: str
+    markdown: str
+    data: Mapping[str, Any]
 
 
-__all__ = ["MediaResult", "ToolResult"]
+ToolResult = str | MediaResult | StructuredToolResult
+
+
+__all__ = ["MediaResult", "StructuredToolResult", "ToolResult"]

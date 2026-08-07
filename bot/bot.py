@@ -4,19 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from time import monotonic
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import MessageEntityType
 from aiogram.types import Message
+from sqlalchemy.exc import SQLAlchemyError
 
 from agent import (
     Agent,
+    AgentRuntimeContext,
     AgentToolError,
     HumorAPISettings,
     LLMProviderError,
     OpenRouterProvider,
     SendMemeTool,
+    calendar_tools,
+)
+from calendar_app import CalendarService
+from database import (
+    DatabaseSettings,
+    SqlAlchemyCalendarUnitOfWorkFactory,
+    create_database_engine,
+    create_session_factory,
 )
 
 from .progress import TelegramProgressReporter
@@ -37,6 +48,8 @@ class TelegramAgentBot:
         agent: Agent,
         bot_username: str,
         allowed_chat_ids: frozenset[int],
+        calendar_service: CalendarService,
+        calendar_default_timezone: str,
         sessions: ChatSessionRegistry | None = None,
         progress: TelegramProgressReporter | None = None,
         renderer: TelegramResponseRenderer | None = None,
@@ -44,6 +57,8 @@ class TelegramAgentBot:
         self.agent = agent
         self.bot_username = bot_username.casefold().lstrip("@")
         self.allowed_chat_ids = allowed_chat_ids
+        self.calendar_service = calendar_service
+        self.calendar_default_timezone = calendar_default_timezone
         self.sessions = sessions or ChatSessionRegistry()
         self.progress = progress or TelegramProgressReporter()
         self.renderer = renderer or TelegramResponseRenderer()
@@ -105,8 +120,13 @@ class TelegramAgentBot:
             logger.info("LLM request started chat_id=%s", message.chat.id)
             async with self.progress.track(message) as status_message:
                 try:
-                    response = await self.agent.ainvoke(prompt, session_id=session_id)
-                except LLMProviderError, AgentToolError:
+                    runtime_context = await self._runtime_context(message)
+                    response = await self.agent.ainvoke(
+                        prompt,
+                        session_id=session_id,
+                        runtime_context=runtime_context,
+                    )
+                except LLMProviderError, AgentToolError, SQLAlchemyError:
                     logger.exception(
                         "LLM request failed chat_id=%s after %.1fs",
                         message.chat.id,
@@ -128,6 +148,23 @@ class TelegramAgentBot:
                 chunks_sent,
                 monotonic() - started_at,
             )
+
+    async def _runtime_context(self, message: Message) -> AgentRuntimeContext:
+        """Build trusted tool metadata without exposing it to model arguments."""
+        settings = await self.calendar_service.get_settings(message.chat.id)
+        user = message.from_user
+        return AgentRuntimeContext(
+            chat_id=message.chat.id,
+            user_id=user.id if user is not None else None,
+            user_display_name=user.full_name if user is not None else None,
+            message_id=message.message_id,
+            current_time=datetime.now(UTC),
+            timezone=(
+                settings.timezone
+                if settings is not None
+                else self.calendar_default_timezone
+            ),
+        )
 
     def _extract_prompt(self, message: Message) -> str | None:
         """Return text without this bot's @mention, or None if not mentioned."""
@@ -154,35 +191,48 @@ async def run_bot() -> None:
     logger.info("Loading bot configuration")
     settings = TelegramSettings()  # type: ignore[call-arg]
     humor_api_settings = HumorAPISettings()  # type: ignore[call-arg]
+    database_settings = DatabaseSettings()  # type: ignore[call-arg]
     logger.info("Configuration loaded allowed_chats=%d", len(settings.chat_ids))
 
-    async with (
-        Bot(token=settings.bot_token.get_secret_value()) as telegram_bot,
-        OpenRouterProvider() as provider,
-    ):
-        logger.info("Connecting to Telegram")
-        bot_user = await telegram_bot.get_me()
-        if bot_user.username is None:
-            raise RuntimeError("Telegram bot must have a username")
+    database_engine = create_database_engine(database_settings)
+    calendar_service = CalendarService(
+        SqlAlchemyCalendarUnitOfWorkFactory(create_session_factory(database_engine))
+    )
+    try:
+        async with (
+            Bot(token=settings.bot_token.get_secret_value()) as telegram_bot,
+            OpenRouterProvider() as provider,
+        ):
+            logger.info("Connecting to Telegram")
+            bot_user = await telegram_bot.get_me()
+            if bot_user.username is None:
+                raise RuntimeError("Telegram bot must have a username")
 
-        application = TelegramAgentBot(
-            agent=Agent(
-                provider,
-                additional_system_prompts=(load_system_prompt(),),
-                tools=(SendMemeTool(humor_api_settings),),
-            ),
-            bot_username=bot_user.username,
-            allowed_chat_ids=settings.chat_ids,
-        )
-        dispatcher = Dispatcher()
-        application.register(dispatcher)
+            application = TelegramAgentBot(
+                agent=Agent(
+                    provider,
+                    additional_system_prompts=(load_system_prompt(),),
+                    tools=(
+                        SendMemeTool(humor_api_settings),
+                        *calendar_tools(calendar_service),
+                    ),
+                ),
+                bot_username=bot_user.username,
+                allowed_chat_ids=settings.chat_ids,
+                calendar_service=calendar_service,
+                calendar_default_timezone=settings.calendar_default_timezone,
+            )
+            dispatcher = Dispatcher()
+            application.register(dispatcher)
 
-        logger.info(
-            "Starting @%s in %d allowed chats",
-            bot_user.username,
-            len(settings.chat_ids),
-        )
-        await dispatcher.start_polling(telegram_bot)
+            logger.info(
+                "Starting @%s in %d allowed chats",
+                bot_user.username,
+                len(settings.chat_ids),
+            )
+            await dispatcher.start_polling(telegram_bot)
+    finally:
+        await database_engine.dispose()
 
 
 def main() -> None:

@@ -110,6 +110,7 @@ HUMOR_API_USER_AGENT=ai-helper/0.1
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890,123456789
+TELEGRAM_CALENDAR_DEFAULT_TIMEZONE=Europe/Moscow
 
 # PostgreSQL
 POSTGRES_DB=ai_helper
@@ -125,6 +126,10 @@ DATABASE_POOL_TIMEOUT=30
 а `DATABASE_*` — приложением и Alembic. Пароль в `DATABASE_URL` должен совпадать
 с `POSTGRES_PASSWORD`. Если пароль содержит специальные символы URL, их нужно
 закодировать.
+
+`TELEGRAM_CALENDAR_DEFAULT_TIMEZONE` — IANA-таймзона для чата, пока у него нет
+сохранённой настройки календаря. После первого календарного действия настройка
+чата хранится в PostgreSQL и не зависит от контекста LangGraph.
 
 ### Разрешённые чаты
 

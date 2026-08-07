@@ -2,6 +2,15 @@
 
 from typing import Any
 
+from .calendar_tools import (
+    CancelCalendarEventTool,
+    CreateCalendarEventTool,
+    GetCalendarEventTool,
+    ListCalendarEventsTool,
+    UpdateCalendarEventTool,
+    calendar_tools,
+)
+from .context import AgentRuntimeContext
 from .providers import (
     LLMProvider,
     LLMProviderError,
@@ -9,24 +18,32 @@ from .providers import (
     OpenRouterProvider,
     ToolCall,
 )
-from .results import MediaResult, ToolResult
+from .results import MediaResult, StructuredToolResult, ToolResult
 from .settings import HumorAPISettings, OpenRouterSettings
 from .tools import AgentTool, AgentToolError, SendMemeTool
 
 __all__ = [
     "Agent",
+    "AgentRuntimeContext",
     "AgentTool",
     "AgentToolError",
+    "CancelCalendarEventTool",
+    "CreateCalendarEventTool",
+    "GetCalendarEventTool",
     "HumorAPISettings",
     "LLMProvider",
     "LLMProviderError",
     "LLMResponse",
+    "ListCalendarEventsTool",
     "MediaResult",
     "OpenRouterProvider",
     "OpenRouterSettings",
     "SendMemeTool",
+    "StructuredToolResult",
     "ToolCall",
     "ToolResult",
+    "UpdateCalendarEventTool",
+    "calendar_tools",
 ]
 
 

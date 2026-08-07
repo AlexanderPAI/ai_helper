@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .context import AgentRuntimeContext
 from .prompts import ToolPrompt, load_tool_prompt
 from .results import MediaResult, ToolResult
 from .settings import HumorAPISettings
@@ -36,9 +37,19 @@ class AgentTool(Protocol):
     @property
     def schema(self) -> Mapping[str, Any]: ...
 
-    def invoke(self, arguments: Mapping[str, Any]) -> ToolResult: ...
+    def invoke(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> ToolResult: ...
 
-    async def ainvoke(self, arguments: Mapping[str, Any]) -> ToolResult: ...
+    async def ainvoke(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> ToolResult: ...
 
 
 class SendMemeTool:
@@ -86,7 +97,12 @@ class SendMemeTool:
             },
         }
 
-    def invoke(self, arguments: Mapping[str, Any]) -> MediaResult:
+    def invoke(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> MediaResult:
         """Fetch exactly one meme using the mode selected by the agent."""
         mode, keywords = self._parse_arguments(arguments)
         payload = self._request(mode, keywords)
@@ -130,9 +146,14 @@ class SendMemeTool:
 
         return payload
 
-    async def ainvoke(self, arguments: Mapping[str, Any]) -> MediaResult:
+    async def ainvoke(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> MediaResult:
         """Fetch one meme without blocking the agent event loop."""
-        return await asyncio.to_thread(self.invoke, arguments)
+        return await asyncio.to_thread(self.invoke, arguments, context=context)
 
     def _request_url(self, mode: Literal["random", "search"]) -> str:
         if mode == "random":

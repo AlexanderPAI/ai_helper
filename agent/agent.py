@@ -6,14 +6,17 @@ from collections.abc import Mapping, Sequence
 from operator import add
 from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from .context import AgentRuntimeContext
 from .prompts import load_system_prompt
 from .providers import LLMProvider, LLMResponse
-from .results import MediaResult, ToolResult
+from .results import MediaResult, StructuredToolResult, ToolResult
 from .tools import AgentTool
 
 Message = dict[str, str]
@@ -71,23 +74,27 @@ class Agent:
         builder.add_edge("llm", END)
         return builder.compile(checkpointer=self.checkpointer)
 
-    def _call_provider(self, state: AgentState) -> AgentState:
+    def _call_provider(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        context = self._runtime_context(config)
         response = self.provider.generate(
-            self._messages_for_provider(state),
+            self._messages_for_provider(state, context),
             **self._provider_options(),
         )
-        output = self._response_output(response)
+        output = self._response_output(response, context=context)
         return {
             "messages": [self._assistant_message(self._history_text(output))],
             "output": output,
         }
 
-    async def _acall_provider(self, state: AgentState) -> AgentState:
+    async def _acall_provider(
+        self, state: AgentState, config: RunnableConfig
+    ) -> AgentState:
+        context = self._runtime_context(config)
         response = await self.provider.agenerate(
-            self._messages_for_provider(state),
+            self._messages_for_provider(state, context),
             **self._provider_options(),
         )
-        output = await self._aresponse_output(response)
+        output = await self._aresponse_output(response, context=context)
         return {
             "messages": [self._assistant_message(self._history_text(output))],
             "output": output,
@@ -100,7 +107,12 @@ class Agent:
             options["tool_choice"] = "auto"
         return options
 
-    def _response_output(self, response: LLMResponse) -> ToolResult:
+    def _response_output(
+        self,
+        response: LLMResponse,
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> ToolResult:
         if not isinstance(response, LLMResponse):
             raise TypeError("provider must return an LLMResponse")
         if not response.tool_calls:
@@ -112,10 +124,15 @@ class Agent:
                 tool = self.tools[tool_call.name]
             except KeyError as error:
                 raise ValueError(f"unknown tool requested: {tool_call.name}") from error
-            results.append(tool.invoke(tool_call.arguments))
+            results.append(tool.invoke(tool_call.arguments, context=context))
         return self._combine_tool_results(results)
 
-    async def _aresponse_output(self, response: LLMResponse) -> ToolResult:
+    async def _aresponse_output(
+        self,
+        response: LLMResponse,
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> ToolResult:
         if not isinstance(response, LLMResponse):
             raise TypeError("provider must return an LLMResponse")
         if not response.tool_calls:
@@ -127,7 +144,7 @@ class Agent:
                 tool = self.tools[tool_call.name]
             except KeyError as error:
                 raise ValueError(f"unknown tool requested: {tool_call.name}") from error
-            results.append(await tool.ainvoke(tool_call.arguments))
+            results.append(await tool.ainvoke(tool_call.arguments, context=context))
         return self._combine_tool_results(results)
 
     @staticmethod
@@ -136,19 +153,36 @@ class Agent:
             return results[0]
         if any(isinstance(result, MediaResult) for result in results):
             raise ValueError("media tools cannot be combined with other tool calls")
-        return "\n".join(results)
+        text_results = [
+            result.markdown if isinstance(result, StructuredToolResult) else result
+            for result in results
+        ]
+        return "\n\n".join(text_results)
 
     @staticmethod
     def _history_text(output: ToolResult) -> str:
         if isinstance(output, MediaResult):
             return f"[Отправлен медиафайл, id={output.id}]"
+        if isinstance(output, StructuredToolResult):
+            return output.markdown
         return output
 
-    def _messages_for_provider(self, state: AgentState) -> list[Message]:
-        return [
+    def _messages_for_provider(
+        self,
+        state: AgentState,
+        context: AgentRuntimeContext | None = None,
+    ) -> list[Message]:
+        messages = [
             *({"role": "system", "content": prompt} for prompt in self.system_prompts),
-            *state["messages"],
         ]
+        if context is not None:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": self._runtime_prompt(context),
+                }
+            )
+        return [*messages, *state["messages"]]
 
     def _assistant_message(self, response: str) -> Message:
         if not isinstance(response, str):
@@ -158,10 +192,36 @@ class Agent:
             "content": response,
         }
 
-    def _config(self, session_id: UUID | None = None) -> dict[str, Any]:
+    def _config(
+        self,
+        session_id: UUID | None = None,
+        runtime_context: AgentRuntimeContext | None = None,
+    ) -> dict[str, Any]:
         return {
-            "configurable": {"thread_id": self._thread_id(session_id)},
+            "configurable": {
+                "thread_id": self._thread_id(session_id),
+                "runtime_context": runtime_context,
+            },
         }
+
+    @staticmethod
+    def _runtime_context(config: RunnableConfig) -> AgentRuntimeContext | None:
+        context = config.get("configurable", {}).get("runtime_context")
+        if context is not None and not isinstance(context, AgentRuntimeContext):
+            raise TypeError("runtime_context must be an AgentRuntimeContext")
+        return context
+
+    @staticmethod
+    def _runtime_prompt(context: AgentRuntimeContext) -> str:
+        local_time = context.current_time.astimezone(ZoneInfo(context.timezone))
+        return (
+            "Доверенные данные текущего запроса: "
+            f"сейчас {local_time.isoformat()}, "
+            f"таймзона календаря {context.timezone}. "
+            "Используй эти дату, время и таймзону для относительных выражений. "
+            "Идентификаторы чата и пользователя инструменты получают напрямую "
+            "от приложения — не спрашивай их и не передавай в аргументах."
+        )
 
     def _thread_id(self, session_id: UUID | None = None) -> str:
         resolved_session_id = session_id or self.session_id
@@ -169,21 +229,31 @@ class Agent:
             raise TypeError("session_id must be a UUID")
         return str(resolved_session_id)
 
-    def invoke(self, prompt: str, *, session_id: UUID | None = None) -> ToolResult:
+    def invoke(
+        self,
+        prompt: str,
+        *,
+        session_id: UUID | None = None,
+        runtime_context: AgentRuntimeContext | None = None,
+    ) -> ToolResult:
         """Send a prompt within a session and return the agent result."""
         result = self.graph.invoke(
             {"messages": [{"role": "user", "content": prompt}]},
-            config=self._config(session_id),
+            config=self._config(session_id, runtime_context),
         )
         return result["output"]
 
     async def ainvoke(
-        self, prompt: str, *, session_id: UUID | None = None
+        self,
+        prompt: str,
+        *,
+        session_id: UUID | None = None,
+        runtime_context: AgentRuntimeContext | None = None,
     ) -> ToolResult:
         """Asynchronously send a prompt within a session."""
         result = await self.graph.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
-            config=self._config(session_id),
+            config=self._config(session_id, runtime_context),
         )
         return result["output"]
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from aiogram.types import Message, MessageEntity
 from telegramify_markdown import convert, split_entities
 
-from agent import MediaResult, ToolResult
+from agent import MediaResult, StructuredToolResult, ToolResult
 
 
 class TelegramResponseRenderer:
@@ -22,6 +22,10 @@ class TelegramResponseRenderer:
             await status_message.delete()
             await request_message.answer_photo(result.url)
             return 1
+        if isinstance(result, StructuredToolResult):
+            return await self._send_markdown(
+                request_message, status_message, result.markdown
+            )
         return await self._send_markdown(request_message, status_message, result)
 
     @staticmethod

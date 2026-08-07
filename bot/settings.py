@@ -1,5 +1,7 @@
 """Telegram bot settings loaded from environment variables."""
 
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +21,7 @@ class TelegramSettings(BaseSettings):
 
     bot_token: SecretStr
     allowed_chat_ids: str = Field(min_length=1)
+    calendar_default_timezone: str = "Europe/Moscow"
 
     @field_validator("allowed_chat_ids")
     @classmethod
@@ -31,6 +34,15 @@ class TelegramSettings(BaseSettings):
         if not chat_ids:
             raise ValueError("must contain at least one chat ID")
         return value
+
+    @field_validator("calendar_default_timezone")
+    @classmethod
+    def validate_calendar_default_timezone(cls, value: str) -> str:
+        """Require an IANA timezone usable for chats without saved settings."""
+        try:
+            return ZoneInfo(value.strip()).key
+        except (AttributeError, ZoneInfoNotFoundError) as error:
+            raise ValueError("must be a valid IANA timezone") from error
 
     @property
     def chat_ids(self) -> frozenset[int]:
