@@ -14,7 +14,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     Uuid,
     text,
 )
@@ -110,8 +109,12 @@ class EventReminder(TimestampMixin, Base):
             "length(btrim(message_text)) > 0",
             name="ck_event_reminders_message_text_not_blank",
         ),
-        UniqueConstraint(
-            "event_id", "remind_at", name="uq_event_reminders_event_remind_at"
+        Index(
+            "ux_event_reminders_event_remind_at_open",
+            "event_id",
+            "remind_at",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'processing')"),
         ),
         Index(
             "ix_event_reminders_status_next_attempt_at",

@@ -70,8 +70,8 @@ class MigratedPostgreSQLSchemaTest(unittest.IsolatedAsyncioTestCase):
             schema["reminder_indexes"],
         )
         self.assertIn(
-            "uq_event_reminders_event_remind_at",
-            schema["reminder_unique_constraints"],
+            "ux_event_reminders_event_remind_at_open",
+            schema["reminder_indexes"],
         )
         self.assertIn(
             "ck_event_reminders_message_text_not_blank",
@@ -88,10 +88,6 @@ class MigratedPostgreSQLSchemaTest(unittest.IsolatedAsyncioTestCase):
             },
             "reminder_indexes": {
                 item["name"] for item in inspector.get_indexes("event_reminders")
-            },
-            "reminder_unique_constraints": {
-                item["name"]
-                for item in inspector.get_unique_constraints("event_reminders")
             },
             "reminder_check_constraints": {
                 item["name"]

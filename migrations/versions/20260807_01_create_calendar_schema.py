@@ -134,19 +134,26 @@ def upgrade() -> None:
             ["event_id"], ["calendar_events.id"], ondelete="CASCADE"
         ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "event_id", "remind_at", name="uq_event_reminders_event_remind_at"
-        ),
     )
     op.create_index(
         "ix_event_reminders_status_next_attempt_at",
         "event_reminders",
         ["status", "next_attempt_at"],
     )
+    op.create_index(
+        "ux_event_reminders_event_remind_at_open",
+        "event_reminders",
+        ["event_id", "remind_at"],
+        unique=True,
+        postgresql_where=sa.text("status IN ('pending', 'processing')"),
+    )
 
 
 def downgrade() -> None:
     """Drop all calendar schema objects in dependency order."""
+    op.drop_index(
+        "ux_event_reminders_event_remind_at_open", table_name="event_reminders"
+    )
     op.drop_index(
         "ix_event_reminders_status_next_attempt_at", table_name="event_reminders"
     )
