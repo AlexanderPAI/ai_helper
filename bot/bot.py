@@ -4,38 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
-from contextlib import suppress
 from time import monotonic
-from uuid import UUID, uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import MessageEntityType
-from aiogram.exceptions import TelegramAPIError
-from aiogram.types import Message, MessageEntity
-from telegramify_markdown import convert, split_entities
+from aiogram.types import Message
 
 from agent import (
     Agent,
     AgentToolError,
     HumorAPISettings,
     LLMProviderError,
-    MediaResult,
     OpenRouterProvider,
     SendMemeTool,
 )
 
+from .progress import TelegramProgressReporter
 from .prompts import load_system_prompt
+from .rendering import TelegramResponseRenderer
+from .sessions import ChatSessionRegistry
 from .settings import TelegramSettings
 
 logger = logging.getLogger(__name__)
-
-STATUS_UPDATE_INTERVAL = 5
-STATUS_MESSAGES = (
-    "🔎 Анализирую вопрос…",
-    "🧠 Обдумываю ответ…",
-    "✍️ Формирую ответ…",
-)
 
 
 class TelegramAgentBot:
@@ -47,12 +37,16 @@ class TelegramAgentBot:
         agent: Agent,
         bot_username: str,
         allowed_chat_ids: frozenset[int],
+        sessions: ChatSessionRegistry | None = None,
+        progress: TelegramProgressReporter | None = None,
+        renderer: TelegramResponseRenderer | None = None,
     ) -> None:
         self.agent = agent
         self.bot_username = bot_username.casefold().lstrip("@")
         self.allowed_chat_ids = allowed_chat_ids
-        self._session_ids: dict[int, UUID] = {}
-        self._chat_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.sessions = sessions or ChatSessionRegistry()
+        self.progress = progress or TelegramProgressReporter()
+        self.renderer = renderer or TelegramResponseRenderer()
 
     def register(self, dispatcher: Dispatcher) -> None:
         """Register bot handlers on an aiogram dispatcher."""
@@ -76,8 +70,8 @@ class TelegramAgentBot:
             )
             return
 
-        async with self._chat_locks[message.chat.id]:
-            session_id = self._session_ids.setdefault(message.chat.id, uuid4())
+        async with self.sessions.lock(message.chat.id):
+            session_id = self.sessions.session_id(message.chat.id)
             logger.info(
                 "Accepted message chat_id=%s message_id=%s session_id=%s",
                 message.chat.id,
@@ -92,8 +86,7 @@ class TelegramAgentBot:
                     session_id,
                 )
                 await self.agent.areset_context(session_id=session_id)
-                new_session_id = uuid4()
-                self._session_ids[message.chat.id] = new_session_id
+                new_session_id = self.sessions.reset(message.chat.id)
                 await message.reply("Контекст чата сброшен.")
                 logger.info(
                     "Context reset completed chat_id=%s old_session_id=%s "
@@ -109,25 +102,18 @@ class TelegramAgentBot:
                 return
 
             started_at = monotonic()
-            status_message = await message.reply("⏳ Получил вопрос. Готовлю ответ…")
             logger.info("LLM request started chat_id=%s", message.chat.id)
-            progress_task = asyncio.create_task(
-                self._update_request_status(status_message, started_at)
-            )
-            try:
-                response = await self.agent.ainvoke(prompt, session_id=session_id)
-            except LLMProviderError, AgentToolError:
-                logger.exception(
-                    "LLM request failed chat_id=%s after %.1fs",
-                    message.chat.id,
-                    monotonic() - started_at,
-                )
-                await status_message.edit_text("❌ Не удалось подготовить ответ.")
-                return
-            finally:
-                progress_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await progress_task
+            async with self.progress.track(message) as status_message:
+                try:
+                    response = await self.agent.ainvoke(prompt, session_id=session_id)
+                except LLMProviderError, AgentToolError:
+                    logger.exception(
+                        "LLM request failed chat_id=%s after %.1fs",
+                        message.chat.id,
+                        monotonic() - started_at,
+                    )
+                    await status_message.edit_text("❌ Не удалось подготовить ответ.")
+                    return
 
             logger.info(
                 "LLM response received chat_id=%s after %.1fs characters=%d",
@@ -135,84 +121,13 @@ class TelegramAgentBot:
                 monotonic() - started_at,
                 len(response) if isinstance(response, str) else 0,
             )
-            if isinstance(response, MediaResult):
-                await status_message.delete()
-                await message.answer_photo(response.url)
-                logger.info(
-                    "Media sent chat_id=%s media_id=%s media_type=%s total_time=%.1fs",
-                    message.chat.id,
-                    response.id,
-                    response.media_type,
-                    monotonic() - started_at,
-                )
-                return
-            chunks_sent = await self._replace_status_with_response(
-                message,
-                status_message,
-                response,
-            )
+            chunks_sent = await self.renderer.send(message, status_message, response)
             logger.info(
                 "Response sent chat_id=%s chunks=%d total_time=%.1fs",
                 message.chat.id,
                 chunks_sent,
                 monotonic() - started_at,
             )
-
-    @staticmethod
-    async def _update_request_status(
-        status_message: Message,
-        started_at: float,
-    ) -> None:
-        """Periodically update one Telegram message while the LLM is working."""
-        update_index = 0
-        while True:
-            await asyncio.sleep(STATUS_UPDATE_INTERVAL)
-            elapsed = monotonic() - started_at
-            status = STATUS_MESSAGES[update_index % len(STATUS_MESSAGES)]
-            update_index += 1
-
-            try:
-                await status_message.edit_text(
-                    f"{status}\n\nПрошло: {elapsed:.0f} сек."
-                )
-            except TelegramAPIError:
-                logger.warning(
-                    "Failed to update status chat_id=%s",
-                    status_message.chat.id,
-                    exc_info=True,
-                )
-
-            logger.info(
-                "LLM request still running chat_id=%s elapsed=%.1fs",
-                status_message.chat.id,
-                elapsed,
-            )
-
-    @staticmethod
-    async def _replace_status_with_response(
-        request_message: Message,
-        status_message: Message,
-        markdown: str,
-    ) -> int:
-        """Replace the progress status with a Telegram-formatted response."""
-        text, entities = convert(markdown)
-        chunks = split_entities(text, entities, max_utf16_len=4096)
-
-        for index, (chunk_text, chunk_entities) in enumerate(chunks):
-            telegram_entities = [
-                MessageEntity(**entity.to_dict()) for entity in chunk_entities
-            ]
-            if index == 0:
-                await status_message.edit_text(
-                    chunk_text,
-                    entities=telegram_entities,
-                )
-            else:
-                await request_message.answer(
-                    chunk_text,
-                    entities=telegram_entities,
-                )
-        return len(chunks)
 
     def _extract_prompt(self, message: Message) -> str | None:
         """Return text without this bot's @mention, or None if not mentioned."""
