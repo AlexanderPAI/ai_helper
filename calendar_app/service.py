@@ -19,7 +19,7 @@ from .domain import (
     UpdateEvent,
 )
 from .errors import CalendarNotFoundError, CalendarValidationError
-from .repository import CalendarUnitOfWorkFactory
+from .ports import CalendarUnitOfWorkFactory
 
 
 @dataclass(frozen=True, slots=True)

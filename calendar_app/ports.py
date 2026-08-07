@@ -1,4 +1,4 @@
-"""Persistence ports required by calendar application use cases."""
+"""Infrastructure-independent ports required by calendar use cases."""
 
 from __future__ import annotations
 

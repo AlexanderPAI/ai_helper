@@ -17,7 +17,7 @@ from .errors import (
     CalendarNotFoundError,
     CalendarValidationError,
 )
-from .repository import (
+from .ports import (
     CalendarRepository,
     CalendarUnitOfWork,
     CalendarUnitOfWorkFactory,

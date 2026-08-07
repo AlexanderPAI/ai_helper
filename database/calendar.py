@@ -25,7 +25,7 @@ from calendar_app.domain import (
     CalendarSettings,
 )
 from calendar_app.errors import CalendarConflictError
-from calendar_app.repository import ReminderRow
+from calendar_app.ports import ReminderRow
 
 from .models import CalendarChat as CalendarChatRecord
 from .models import CalendarEvent as CalendarEventRecord
