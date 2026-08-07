@@ -14,7 +14,6 @@ from .settings import HumorAPISettings, OpenRouterSettings
 from .tools import AgentTool, AgentToolError, SendMemeTool
 
 __all__ = [
-    "TELEGRAM_MESSAGE_LIMIT",
     "Agent",
     "AgentTool",
     "AgentToolError",
@@ -33,12 +32,8 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     """Load agent classes lazily so ``python -m agent.agent`` runs cleanly."""
-    if name in {"Agent", "TELEGRAM_MESSAGE_LIMIT"}:
-        from .agent import TELEGRAM_MESSAGE_LIMIT, Agent
+    if name == "Agent":
+        from .agent import Agent
 
-        exports = {
-            "Agent": Agent,
-            "TELEGRAM_MESSAGE_LIMIT": TELEGRAM_MESSAGE_LIMIT,
-        }
-        return exports[name]
+        return Agent
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

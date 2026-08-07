@@ -25,6 +25,7 @@ from agent import (
     SendMemeTool,
 )
 
+from .prompts import load_system_prompt
 from .settings import TelegramSettings
 
 logger = logging.getLogger(__name__)
@@ -250,7 +251,11 @@ async def run_bot() -> None:
             raise RuntimeError("Telegram bot must have a username")
 
         application = TelegramAgentBot(
-            agent=Agent(provider, tools=(SendMemeTool(humor_api_settings),)),
+            agent=Agent(
+                provider,
+                additional_system_prompts=(load_system_prompt(),),
+                tools=(SendMemeTool(humor_api_settings),),
+            ),
             bot_username=bot_user.username,
             allowed_chat_ids=settings.chat_ids,
         )

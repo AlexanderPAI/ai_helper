@@ -16,9 +16,6 @@ from .providers import LLMProvider, LLMResponse
 from .results import MediaResult, ToolResult
 from .tools import AgentTool
 
-TELEGRAM_MESSAGE_LIMIT = 4096
-
-
 Message = dict[str, str]
 
 
@@ -41,23 +38,28 @@ class Agent:
         provider: LLMProvider,
         *,
         session_id: UUID | None = None,
-        max_response_length: int = TELEGRAM_MESSAGE_LIMIT,
+        additional_system_prompts: Sequence[str] = (),
         provider_options: Mapping[str, Any] | None = None,
         tools: Sequence[AgentTool] = (),
     ) -> None:
-        if max_response_length < 1:
-            raise ValueError("max_response_length must be greater than zero")
         if session_id is not None and not isinstance(session_id, UUID):
             raise TypeError("session_id must be a UUID")
+        if any(
+            not isinstance(prompt, str) or not prompt.strip()
+            for prompt in additional_system_prompts
+        ):
+            raise ValueError("additional system prompts must be non-empty strings")
 
         self.provider = provider
         self.session_id = session_id or uuid4()
-        self.max_response_length = max_response_length
         self.provider_options = dict(provider_options or {})
         self.tools = {tool.name: tool for tool in tools}
         if len(self.tools) != len(tools):
             raise ValueError("tool names must be unique")
-        self.system_prompt = load_system_prompt()
+        self.system_prompts = (
+            load_system_prompt(),
+            *(prompt.strip() for prompt in additional_system_prompts),
+        )
         self.checkpointer = InMemorySaver()
         self.graph = self._build_graph()
 
@@ -144,7 +146,7 @@ class Agent:
 
     def _messages_for_provider(self, state: AgentState) -> list[Message]:
         return [
-            {"role": "system", "content": self.system_prompt},
+            *({"role": "system", "content": prompt} for prompt in self.system_prompts),
             *state["messages"],
         ]
 
@@ -153,7 +155,7 @@ class Agent:
             raise TypeError("provider must return a string")
         return {
             "role": "assistant",
-            "content": response[: self.max_response_length],
+            "content": response,
         }
 
     def _config(self, session_id: UUID | None = None) -> dict[str, Any]:
@@ -168,7 +170,7 @@ class Agent:
         return str(resolved_session_id)
 
     def invoke(self, prompt: str, *, session_id: UUID | None = None) -> ToolResult:
-        """Send a prompt within a session and return a size-limited response."""
+        """Send a prompt within a session and return the agent result."""
         result = self.graph.invoke(
             {"messages": [{"role": "user", "content": prompt}]},
             config=self._config(session_id),
