@@ -2,7 +2,13 @@
 
 from typing import Any
 
-from .providers import LLMProvider, LLMResponse, OpenRouterProvider, ToolCall
+from .providers import (
+    LLMProvider,
+    LLMProviderError,
+    LLMResponse,
+    OpenRouterProvider,
+    ToolCall,
+)
 from .settings import HumorAPISettings, OpenRouterSettings
 from .tools import AgentTool, AgentToolError, MemeResult, SendMemeTool
 
@@ -13,6 +19,7 @@ __all__ = [
     "AgentToolError",
     "HumorAPISettings",
     "LLMProvider",
+    "LLMProviderError",
     "LLMResponse",
     "MemeResult",
     "OpenRouterProvider",

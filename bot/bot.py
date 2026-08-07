@@ -13,13 +13,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import MessageEntityType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message, MessageEntity
-from openai import OpenAIError
 from telegramify_markdown import convert, split_entities
 
 from agent import (
     Agent,
     AgentToolError,
     HumorAPISettings,
+    LLMProviderError,
     MemeResult,
     OpenRouterProvider,
     SendMemeTool,
@@ -115,7 +115,7 @@ class TelegramAgentBot:
             )
             try:
                 response = await self.agent.ainvoke(prompt, session_id=session_id)
-            except OpenAIError, AgentToolError:
+            except LLMProviderError, AgentToolError:
                 logger.exception(
                     "LLM request failed chat_id=%s after %.1fs",
                     message.chat.id,
