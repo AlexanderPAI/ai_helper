@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 from openai import OpenAIError
 
-from agent.providers import LLMProviderError, OpenRouterProvider
+from agent.providers import LLMProviderError, OpenRouterProvider, UrlCitation
 
 
 class OpenRouterProviderErrorTest(unittest.IsolatedAsyncioTestCase):
@@ -35,6 +35,36 @@ class OpenRouterProviderErrorTest(unittest.IsolatedAsyncioTestCase):
             await self.provider.achat([])
 
         self.assertIsInstance(raised.exception.__cause__, OpenAIError)
+
+    def test_build_response_preserves_web_citations(self) -> None:
+        message = SimpleNamespace(
+            content="Ответ со ссылкой",
+            tool_calls=None,
+            annotations=[
+                SimpleNamespace(
+                    type="url_citation",
+                    url_citation=SimpleNamespace(
+                        url="https://example.test/place",
+                        title="Example Place",
+                        content="Открыто до 02:00",
+                    ),
+                )
+            ],
+        )
+        completion = SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        response = OpenRouterProvider._build_response(completion)
+
+        self.assertEqual(
+            response.citations,
+            (
+                UrlCitation(
+                    url="https://example.test/place",
+                    title="Example Place",
+                    content="Открыто до 02:00",
+                ),
+            ),
+        )
 
 
 if __name__ == "__main__":

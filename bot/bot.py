@@ -23,6 +23,7 @@ from agent import (
     HumorAPISettings,
     LLMProviderError,
     OpenRouterProvider,
+    OpenRouterWebSearchSettings,
     SearchPlacesTool,
     SendMemeTool,
     calendar_tools,
@@ -199,6 +200,7 @@ async def run_bot() -> None:
     logger.info("Loading bot configuration")
     settings = TelegramSettings()  # type: ignore[call-arg]
     humor_api_settings = HumorAPISettings()  # type: ignore[call-arg]
+    web_search_settings = OpenRouterWebSearchSettings()
     database_settings = DatabaseSettings()  # type: ignore[call-arg]
     reminder_settings = ReminderWorkerSettings()
     logger.info("Configuration loaded allowed_chats=%d", len(settings.chat_ids))
@@ -237,7 +239,7 @@ async def run_bot() -> None:
                         additional_system_prompts=(load_system_prompt(),),
                         tools=(
                             SendMemeTool(humor_api_settings),
-                            SearchPlacesTool(provider),
+                            SearchPlacesTool(provider, web_search_settings),
                             *calendar_tools(calendar_service),
                         ),
                     ),

@@ -6,8 +6,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from .context import AgentRuntimeContext
+from .openrouter_tools import openrouter_web_search_tool
 from .prompts import ToolPrompt, load_tool_prompt
 from .providers import LLMProvider
+from .settings import OpenRouterWebSearchSettings
 
 
 class SearchPlacesTool:
@@ -20,8 +22,13 @@ class SearchPlacesTool:
 
     name = "search_places"
 
-    def __init__(self, search_provider: LLMProvider) -> None:
+    def __init__(
+        self,
+        search_provider: LLMProvider,
+        web_search_settings: OpenRouterWebSearchSettings,
+    ) -> None:
         self.search_provider = search_provider
+        self.web_search_tool = openrouter_web_search_tool(web_search_settings)
         self.prompt: ToolPrompt = load_tool_prompt(self.name)
 
     @property

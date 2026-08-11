@@ -19,9 +19,14 @@ from .providers import (
     LLMResponse,
     OpenRouterProvider,
     ToolCall,
+    UrlCitation,
 )
 from .results import MediaResult, StructuredToolResult, ToolResult
-from .settings import HumorAPISettings, OpenRouterSettings
+from .settings import (
+    HumorAPISettings,
+    OpenRouterSettings,
+    OpenRouterWebSearchSettings,
+)
 from .tools import AgentTool, AgentToolError, SendMemeTool
 
 __all__ = [
@@ -41,12 +46,14 @@ __all__ = [
     "MediaResult",
     "OpenRouterProvider",
     "OpenRouterSettings",
+    "OpenRouterWebSearchSettings",
     "SearchPlacesTool",
     "SendMemeTool",
     "StructuredToolResult",
     "ToolCall",
     "ToolResult",
     "UpdateCalendarEventTool",
+    "UrlCitation",
     "calendar_tools",
 ]
 

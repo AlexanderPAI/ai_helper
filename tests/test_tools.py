@@ -11,7 +11,7 @@ from pydantic import AnyHttpUrl, SecretStr
 
 from agent.place_tools import SearchPlacesTool
 from agent.results import MediaResult
-from agent.settings import HumorAPISettings
+from agent.settings import HumorAPISettings, OpenRouterWebSearchSettings
 from agent.tools import SendMemeTool
 
 
@@ -140,7 +140,7 @@ class SendMemeToolTest(unittest.TestCase):
 
 class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.tool = SearchPlacesTool(_UnusedProvider())
+        self.tool = SearchPlacesTool(_UnusedProvider(), OpenRouterWebSearchSettings())
 
     def test_schema_is_loaded_from_yaml(self) -> None:
         schema = self.tool.schema["function"]
@@ -148,6 +148,18 @@ class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(schema["name"], "search_places")
         self.assertEqual(schema["description"], self.tool.prompt.description)
         self.assertEqual(set(schema["parameters"]["required"]), {"query", "location"})
+        self.assertEqual(
+            self.tool.web_search_tool,
+            {
+                "type": "openrouter:web_search",
+                "parameters": {
+                    "engine": "exa",
+                    "max_results": 5,
+                    "max_total_results": 10,
+                    "max_characters": 2_000,
+                },
+            },
+        )
 
     async def test_placeholder_does_not_call_provider(self) -> None:
         result = await self.tool.ainvoke(
