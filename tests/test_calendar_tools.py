@@ -151,7 +151,6 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "place": {
                     "name": "Кафе Север",
                     "address": "Москва, Тверская улица, 1",
-                    "website": "https://example.test/cafe",
                 },
             },
             context=runtime_context(),
@@ -162,8 +161,7 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
             request.description,
             "Встреча с друзьями\n\n"
             "Название: Кафе Север\n"
-            "Адрес: Москва, Тверская улица, 1\n"
-            "Сайт: https://example.test/cafe",
+            "Адрес: Москва, Тверская улица, 1",
         )
 
     async def test_list_is_chronological_and_hides_internal_fields_from_user(
@@ -277,7 +275,6 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
                 "place": {
                     "name": "Кафе Север",
                     "address": "Москва, Тверская улица, 1",
-                    "website": "https://example.test/cafe",
                 },
             },
             context=runtime_context(),
@@ -288,8 +285,7 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
             request.description,
             "Продление договора\n\n"
             "Название: Кафе Север\n"
-            "Адрес: Москва, Тверская улица, 1\n"
-            "Сайт: https://example.test/cafe",
+            "Адрес: Москва, Тверская улица, 1",
         )
 
     async def test_add_reminder_uses_dedicated_service_operation(self) -> None:

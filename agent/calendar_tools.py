@@ -9,7 +9,6 @@ import json
 from collections.abc import Awaitable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, TypeVar
-from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -527,14 +526,8 @@ def _place_schema(description: str) -> dict[str, Any]:
         "properties": {
             "name": {"type": "string", "minLength": 1, "maxLength": 255},
             "address": {"type": "string", "minLength": 1, "maxLength": 500},
-            "website": {
-                "type": "string",
-                "format": "uri",
-                "minLength": 1,
-                "maxLength": 1000,
-            },
         },
-        "required": ["name", "address", "website"],
+        "required": ["name", "address"],
         "additionalProperties": False,
     }
 
@@ -592,12 +585,7 @@ def _description_with_place(
         raise AgentToolError("place must be an object")
     name = _required_string(raw_place, "name")
     address = _required_string(raw_place, "address")
-    website = _required_string(raw_place, "website")
-    parsed_website = urlsplit(website)
-    if parsed_website.scheme not in {"http", "https"} or not parsed_website.netloc:
-        raise AgentToolError("place website must be an HTTP(S) URL")
-
-    place_block = f"Название: {name}\nАдрес: {address}\nСайт: {website}"
+    place_block = f"Название: {name}\nАдрес: {address}"
     combined = (
         f"{description.rstrip()}\n\n{place_block}" if description else place_block
     )

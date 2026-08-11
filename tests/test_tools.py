@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import UTC, datetime
 from io import BytesIO
+from types import SimpleNamespace
 from typing import Self
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from pydantic import AnyHttpUrl, SecretStr
 
+from agent.context import AgentRuntimeContext
 from agent.place_tools import SearchPlacesTool
 from agent.providers import LLMResponse, UrlCitation
 from agent.results import MediaResult
@@ -31,7 +34,10 @@ class _PlacesProvider:
     @staticmethod
     def _response() -> LLMResponse:
         return LLMResponse(
-            content="Нашёл **Бар** на Тверской.",
+            content=(
+                "Нашёл [**Бар**](https://example.test/bar) на Тверской.\n\n"
+                "## Источники\n\n- https://example.test/source"
+            ),
             citations=(
                 UrlCitation(
                     url="https://example.test/bar",
@@ -193,7 +199,8 @@ class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("Нашёл **Бар**", result)
-        self.assertIn("[Бар — официальный сайт](https://example.test/bar)", result)
+        self.assertNotIn("https://", result)
+        self.assertNotIn("Источники", result)
         self.assertIn("запланировать посещение", result)
         messages, options = self.provider.calls[0]
         self.assertIn("Локация: Москва", messages[1]["content"])
@@ -210,6 +217,51 @@ class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "В каком городе искать места?")
         self.assertEqual(self.provider.calls, [])
+
+    async def test_recent_venue_event_is_offered_instead_of_new_event(self) -> None:
+        now = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+        recent_event = SimpleNamespace(
+            title="Ужин с друзьями",
+            description="Обсудить поездку",
+            starts_at=datetime(2026, 8, 12, 16, 0, tzinfo=UTC),
+            created_at=datetime(2026, 8, 11, 11, 30, tzinfo=UTC),
+        )
+        calendar_service = SimpleNamespace(
+            list_event_page=AsyncMock(
+                return_value=SimpleNamespace(events=(recent_event,))
+            )
+        )
+        tool = SearchPlacesTool(
+            self.provider,
+            OpenRouterWebSearchSettings(),
+            calendar_service,
+        )
+
+        result = await tool.ainvoke(
+            {
+                "query": "спокойный ресторан",
+                "location": "Москва",
+                "is_food_service": True,
+            },
+            context=AgentRuntimeContext(
+                chat_id=-100123,
+                user_id=42,
+                user_display_name="Александр",
+                message_id=7,
+                current_time=now,
+                timezone="Europe/Moscow",
+            ),
+        )
+
+        self.assertIn("«Ужин с друзьями»", result)
+        self.assertIn("12.08.2026 в 19:00", result)
+        self.assertIn("добавить одно из найденных мест в это событие", result)
+        self.assertNotIn("запланировать посещение", result)
+        calendar_service.list_event_page.assert_awaited_once_with(
+            -100123,
+            starts_from=now,
+            limit=20,
+        )
 
 
 if __name__ == "__main__":

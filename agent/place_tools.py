@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import re
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
+
+from calendar_app import CalendarError, CalendarEvent, CalendarService
 
 from .context import AgentRuntimeContext
 from .openrouter_tools import openrouter_web_search_tool
 from .prompts import ToolPrompt, load_tool_prompt
-from .providers import LLMProvider, LLMResponse, UrlCitation
+from .providers import LLMProvider, LLMResponse
 from .settings import OpenRouterWebSearchSettings
 from .tools import AgentToolError
 
@@ -22,23 +28,44 @@ _AMBIGUOUS_LOCATIONS = {
     "near me",
 }
 
+_RECENT_EVENT_WINDOW = timedelta(hours=24)
+_VENUE_EVENT_MARKERS = (
+    "бар",
+    "кафе",
+    "кальян",
+    "кофейн",
+    "паб",
+    "пицц",
+    "ресторан",
+    "столов",
+    "встреч",
+    "завтрак",
+    "обед",
+    "ужин",
+    "свидан",
+    "посид",
+    "праздн",
+    "день рождения",
+    "др ",
+)
+
+logger = logging.getLogger(__name__)
+
 _SEARCH_SYSTEM_PROMPT = """
 Ты выполняешь специализированный поиск физических мест для посещения через
 доступный инструмент веб-поиска. Обязательно выполни веб-поиск и отвечай на
 русском языке.
 
-Ищи реальные действующие заведения в указанном городе. Для России отдавай
-приоритет официальным сайтам и официальным страницам заведений, затем свежим
-страницам надёжных каталогов и городских изданий. Не считай старую подборку
-доказательством того, что заведение продолжает работать.
+Ищи реальные действующие заведения в указанном городе. Для России проверяй
+официальные страницы заведений, свежие страницы надёжных каталогов и городских
+изданий. Не считай старую подборку доказательством того, что заведение продолжает
+работать.
 
-Верни не больше запрошенного числа вариантов. Для каждого укажи название, адрес
-и прямую ссылку на официальный сайт или официальную страницу заведения, а также
+Верни не больше запрошенного числа вариантов. Для каждого укажи название, адрес,
 почему место подходит, подтверждённый режим работы и ценовой ориентир, если они
-найдены. Оформляй название, адрес и сайт явно, чтобы выбранный вариант можно было
-добавить в календарь. Не придумывай отсутствующие данные и отмечай то, что не
-удалось подтвердить. Не показывай внутренние поисковые запросы и технические
-сведения.
+найдены. Не показывай ссылки, URL, список источников, внутренние поисковые запросы
+и технические сведения. Не придумывай отсутствующие данные и отмечай то, что не
+удалось подтвердить.
 """.strip()
 
 
@@ -51,9 +78,11 @@ class SearchPlacesTool:
         self,
         search_provider: LLMProvider,
         web_search_settings: OpenRouterWebSearchSettings,
+        calendar_service: CalendarService | None = None,
     ) -> None:
         self.search_provider = search_provider
         self.web_search_tool = openrouter_web_search_tool(web_search_settings)
+        self.calendar_service = calendar_service
         self.prompt: ToolPrompt = load_tool_prompt(self.name)
 
     @property
@@ -120,7 +149,15 @@ class SearchPlacesTool:
             self._messages(query, location, limit, context),
             tools=[self.web_search_tool],
         )
-        return self._format_response(response, is_food_service=is_food_service)
+        recent_event = (
+            asyncio.run(self._recent_venue_event(context)) if is_food_service else None
+        )
+        return self._format_response(
+            response,
+            is_food_service=is_food_service,
+            recent_event=recent_event,
+            context=context,
+        )
 
     async def ainvoke(
         self,
@@ -137,7 +174,15 @@ class SearchPlacesTool:
             self._messages(query, location, limit, context),
             tools=[self.web_search_tool],
         )
-        return self._format_response(response, is_food_service=is_food_service)
+        recent_event = (
+            await self._recent_venue_event(context) if is_food_service else None
+        )
+        return self._format_response(
+            response,
+            is_food_service=is_food_service,
+            recent_event=recent_event,
+            context=context,
+        )
 
     @staticmethod
     def _parse_arguments(
@@ -189,32 +234,79 @@ class SearchPlacesTool:
         ]
 
     @staticmethod
-    def _format_response(response: LLMResponse, *, is_food_service: bool) -> str:
+    def _format_response(
+        response: LLMResponse,
+        *,
+        is_food_service: bool,
+        recent_event: CalendarEvent | None,
+        context: AgentRuntimeContext | None,
+    ) -> str:
         if not isinstance(response, LLMResponse):
             raise TypeError("place search provider must return an LLMResponse")
         content = response.content.strip()
         if not content:
             raise AgentToolError("place search returned an empty response")
-
-        unseen = [
-            citation for citation in response.citations if citation.url not in content
-        ]
-        if unseen:
-            sources = "\n".join(
-                f"- [{SearchPlacesTool._citation_title(citation)}]({citation.url})"
-                for citation in unseen
-            )
-            content = f"{content}\n\n**Источники**\n\n{sources}"
+        content = SearchPlacesTool._remove_links(content)
         if is_food_service:
-            content = (
-                f"{content}\n\nХотите запланировать посещение одного из этих "
-                "заведений в календаре?"
-            )
+            if recent_event is not None and context is not None:
+                local_start = recent_event.starts_at.astimezone(
+                    ZoneInfo(context.timezone)
+                )
+                event_label = local_start.strftime("%d.%m.%Y в %H:%M")
+                content = (
+                    f"{content}\n\nНедавно вы создали событие "
+                    f"«{recent_event.title}» на {event_label}. Хотите добавить "
+                    "одно из найденных мест в это событие?"
+                )
+            else:
+                content = (
+                    f"{content}\n\nХотите запланировать посещение одного из этих "
+                    "заведений в календаре?"
+                )
         return content
 
+    async def _recent_venue_event(
+        self,
+        context: AgentRuntimeContext | None,
+    ) -> CalendarEvent | None:
+        if self.calendar_service is None or context is None:
+            return None
+        try:
+            page = await self.calendar_service.list_event_page(
+                context.chat_id,
+                starts_from=context.current_time,
+                limit=20,
+            )
+        except CalendarError:
+            logger.warning("Could not inspect recent calendar events", exc_info=True)
+            return None
+
+        cutoff = context.current_time - _RECENT_EVENT_WINDOW
+        candidates = [
+            event
+            for event in page.events
+            if event.created_at >= cutoff and self._resembles_venue_visit(event)
+        ]
+        return max(candidates, key=lambda event: event.created_at, default=None)
+
     @staticmethod
-    def _citation_title(citation: UrlCitation) -> str:
-        return citation.title.replace("[", "").replace("]", "").strip() or citation.url
+    def _resembles_venue_visit(event: CalendarEvent) -> bool:
+        description = event.description or ""
+        if "Название:" in description and "Адрес:" in description:
+            return False
+        text = f"{event.title} {description}".casefold()
+        return any(marker in text for marker in _VENUE_EVENT_MARKERS)
+
+    @staticmethod
+    def _remove_links(content: str) -> str:
+        content = re.sub(
+            r"(?ims)\n+#{0,3}\s*\**источники\**\s*:?\s*\n.*\Z",
+            "",
+            content,
+        )
+        content = re.sub(r"\[([^\]]+)]\(https?://[^)]+\)", r"\1", content)
+        content = re.sub(r"https?://\S+", "", content)
+        return re.sub(r"[ \t]+(?=\n|$)", "", content).strip()
 
     @staticmethod
     def _location_question() -> str:

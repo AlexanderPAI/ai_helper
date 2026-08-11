@@ -239,7 +239,9 @@ async def run_bot() -> None:
                         additional_system_prompts=(load_system_prompt(),),
                         tools=(
                             SendMemeTool(humor_api_settings),
-                            SearchPlacesTool(provider, web_search_settings),
+                            SearchPlacesTool(
+                                provider, web_search_settings, calendar_service
+                            ),
                             *calendar_tools(calendar_service),
                         ),
                     ),
