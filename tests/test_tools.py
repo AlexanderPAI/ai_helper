@@ -9,8 +9,9 @@ from urllib.parse import parse_qs, urlparse
 
 from pydantic import AnyHttpUrl, SecretStr
 
+from agent.results import MediaResult
 from agent.settings import HumorAPISettings
-from agent.tools import MemeResult, SendMemeTool
+from agent.tools import SendMemeTool
 
 
 class _Response(BytesIO):
@@ -30,6 +31,20 @@ class SendMemeToolTest(unittest.TestCase):
             user_agent="ai-helper-test/0.1",
         )
         self.tool = SendMemeTool(settings)
+
+    def test_model_instructions_are_loaded_from_yaml(self) -> None:
+        schema = self.tool.schema["function"]
+
+        self.assertEqual(schema["description"], self.tool.prompt.description)
+        properties = schema["parameters"]["properties"]
+        self.assertEqual(
+            properties["mode"]["description"],
+            self.tool.prompt.parameter_descriptions["mode"],
+        )
+        self.assertEqual(
+            properties["keywords"]["description"],
+            self.tool.prompt.parameter_descriptions["keywords"],
+        )
 
     @patch("agent.tools.urlopen")
     def test_search_uses_agent_keywords_and_requests_one_result(
@@ -53,7 +68,7 @@ class SendMemeToolTest(unittest.TestCase):
 
         self.assertEqual(
             result,
-            MemeResult(42, "https://images.example.test/meme.jpg", "image/jpeg"),
+            MediaResult(42, "https://images.example.test/meme.jpg", "image/jpeg"),
         )
         request = mock_urlopen.call_args.args[0]
         self.assertEqual(

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, Self
 
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, OpenAI, OpenAIError
 from openai.types.chat import ChatCompletion
 
 from .settings import OpenRouterSettings
@@ -43,6 +43,10 @@ class LLMProvider(Protocol):
         messages: Sequence[Mapping[str, Any]],
         **options: Any,
     ) -> LLMResponse: ...
+
+
+class LLMProviderError(RuntimeError):
+    """Provider-independent failure while communicating with an LLM service."""
 
 
 class OpenRouterProvider(LLMProvider):
@@ -88,11 +92,14 @@ class OpenRouterProvider(LLMProvider):
         **options: Any,
     ) -> ChatCompletion:
         """Create a chat completion using the configured model."""
-        return self.client.chat.completions.create(
-            model=self.settings.model,
-            messages=list(messages),  # type: ignore[arg-type]
-            **options,
-        )
+        try:
+            return self.client.chat.completions.create(
+                model=self.settings.model,
+                messages=list(messages),  # type: ignore[arg-type]
+                **options,
+            )
+        except OpenAIError as error:
+            raise LLMProviderError("LLM provider request failed") from error
 
     def generate(
         self,
@@ -108,11 +115,14 @@ class OpenRouterProvider(LLMProvider):
         **options: Any,
     ) -> ChatCompletion:
         """Asynchronously create a chat completion."""
-        return await self.async_client.chat.completions.create(
-            model=self.settings.model,
-            messages=list(messages),  # type: ignore[arg-type]
-            **options,
-        )
+        try:
+            return await self.async_client.chat.completions.create(
+                model=self.settings.model,
+                messages=list(messages),  # type: ignore[arg-type]
+                **options,
+            )
+        except OpenAIError as error:
+            raise LLMProviderError("LLM provider request failed") from error
 
     async def agenerate(
         self,
