@@ -12,6 +12,7 @@ from .calendar_tools import (
     calendar_tools,
 )
 from .context import AgentRuntimeContext
+from .place_tools import SearchPlacesTool
 from .providers import (
     LLMProvider,
     LLMProviderError,
@@ -40,6 +41,7 @@ __all__ = [
     "MediaResult",
     "OpenRouterProvider",
     "OpenRouterSettings",
+    "SearchPlacesTool",
     "SendMemeTool",
     "StructuredToolResult",
     "ToolCall",

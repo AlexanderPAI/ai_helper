@@ -9,9 +9,18 @@ from urllib.parse import parse_qs, urlparse
 
 from pydantic import AnyHttpUrl, SecretStr
 
+from agent.place_tools import SearchPlacesTool
 from agent.results import MediaResult
 from agent.settings import HumorAPISettings
 from agent.tools import SendMemeTool
+
+
+class _UnusedProvider:
+    def generate(self, messages, **options):
+        raise AssertionError("placeholder must not call the provider")
+
+    async def agenerate(self, messages, **options):
+        raise AssertionError("placeholder must not call the provider")
 
 
 class _Response(BytesIO):
@@ -127,6 +136,25 @@ class SendMemeToolTest(unittest.TestCase):
         )
         second_request = mock_urlopen.call_args_list[1].args[0]
         self.assertEqual(second_request.full_url, "https://example.test/memes/random")
+
+
+class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.tool = SearchPlacesTool(_UnusedProvider())
+
+    def test_schema_is_loaded_from_yaml(self) -> None:
+        schema = self.tool.schema["function"]
+
+        self.assertEqual(schema["name"], "search_places")
+        self.assertEqual(schema["description"], self.tool.prompt.description)
+        self.assertEqual(set(schema["parameters"]["required"]), {"query", "location"})
+
+    async def test_placeholder_does_not_call_provider(self) -> None:
+        result = await self.tool.ainvoke(
+            {"query": "спокойная кальянная", "location": "Москва"}
+        )
+
+        self.assertEqual(result, "Поиск мест пока не подключён.")
 
 
 if __name__ == "__main__":

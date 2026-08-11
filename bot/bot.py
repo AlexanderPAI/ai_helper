@@ -23,6 +23,7 @@ from agent import (
     HumorAPISettings,
     LLMProviderError,
     OpenRouterProvider,
+    SearchPlacesTool,
     SendMemeTool,
     calendar_tools,
 )
@@ -236,6 +237,7 @@ async def run_bot() -> None:
                         additional_system_prompts=(load_system_prompt(),),
                         tools=(
                             SendMemeTool(humor_api_settings),
+                            SearchPlacesTool(provider),
                             *calendar_tools(calendar_service),
                         ),
                     ),
