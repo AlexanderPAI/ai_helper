@@ -1,11 +1,9 @@
 """Application settings loaded from environment variables."""
 
-from pathlib import Path
-
 from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from config import PROJECT_ROOT
 
 
 class OpenRouterSettings(BaseSettings):

@@ -4,37 +4,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
+import os
+import socket
 from contextlib import suppress
+from datetime import UTC, datetime
 from time import monotonic
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import MessageEntityType
-from aiogram.exceptions import TelegramAPIError
-from aiogram.types import Message, MessageEntity
-from openai import OpenAIError
-from telegramify_markdown import convert, split_entities
+from aiogram.types import Message
+from sqlalchemy.exc import SQLAlchemyError
 
 from agent import (
     Agent,
+    AgentRuntimeContext,
     AgentToolError,
     HumorAPISettings,
-    MemeResult,
+    LLMProviderError,
     OpenRouterProvider,
     SendMemeTool,
+    calendar_tools,
 )
+from calendar_app import CalendarService
+from database import (
+    DatabaseSettings,
+    SqlAlchemyCalendarUnitOfWorkFactory,
+    SqlAlchemyReminderUnitOfWorkFactory,
+    create_database_engine,
+    create_session_factory,
+)
+from reminder_app import ReminderWorker
 
-from .settings import TelegramSettings
+from .progress import TelegramProgressReporter
+from .prompts import load_system_prompt
+from .reminders import TelegramReminderSender
+from .rendering import TelegramResponseRenderer
+from .sessions import ChatSessionRegistry
+from .settings import ReminderWorkerSettings, TelegramSettings
 
 logger = logging.getLogger(__name__)
-
-STATUS_UPDATE_INTERVAL = 5
-STATUS_MESSAGES = (
-    "🔎 Анализирую вопрос…",
-    "🧠 Обдумываю ответ…",
-    "✍️ Формирую ответ…",
-)
 
 
 class TelegramAgentBot:
@@ -46,12 +55,20 @@ class TelegramAgentBot:
         agent: Agent,
         bot_username: str,
         allowed_chat_ids: frozenset[int],
+        calendar_service: CalendarService,
+        calendar_default_timezone: str,
+        sessions: ChatSessionRegistry | None = None,
+        progress: TelegramProgressReporter | None = None,
+        renderer: TelegramResponseRenderer | None = None,
     ) -> None:
         self.agent = agent
         self.bot_username = bot_username.casefold().lstrip("@")
         self.allowed_chat_ids = allowed_chat_ids
-        self._session_ids: dict[int, UUID] = {}
-        self._chat_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.calendar_service = calendar_service
+        self.calendar_default_timezone = calendar_default_timezone
+        self.sessions = sessions or ChatSessionRegistry()
+        self.progress = progress or TelegramProgressReporter()
+        self.renderer = renderer or TelegramResponseRenderer()
 
     def register(self, dispatcher: Dispatcher) -> None:
         """Register bot handlers on an aiogram dispatcher."""
@@ -75,8 +92,8 @@ class TelegramAgentBot:
             )
             return
 
-        async with self._chat_locks[message.chat.id]:
-            session_id = self._session_ids.setdefault(message.chat.id, uuid4())
+        async with self.sessions.lock(message.chat.id):
+            session_id = self.sessions.session_id(message.chat.id)
             logger.info(
                 "Accepted message chat_id=%s message_id=%s session_id=%s",
                 message.chat.id,
@@ -91,8 +108,7 @@ class TelegramAgentBot:
                     session_id,
                 )
                 await self.agent.areset_context(session_id=session_id)
-                new_session_id = uuid4()
-                self._session_ids[message.chat.id] = new_session_id
+                new_session_id = self.sessions.reset(message.chat.id)
                 await message.reply("Контекст чата сброшен.")
                 logger.info(
                     "Context reset completed chat_id=%s old_session_id=%s "
@@ -108,25 +124,23 @@ class TelegramAgentBot:
                 return
 
             started_at = monotonic()
-            status_message = await message.reply("⏳ Получил вопрос. Готовлю ответ…")
             logger.info("LLM request started chat_id=%s", message.chat.id)
-            progress_task = asyncio.create_task(
-                self._update_request_status(status_message, started_at)
-            )
-            try:
-                response = await self.agent.ainvoke(prompt, session_id=session_id)
-            except OpenAIError, AgentToolError:
-                logger.exception(
-                    "LLM request failed chat_id=%s after %.1fs",
-                    message.chat.id,
-                    monotonic() - started_at,
-                )
-                await status_message.edit_text("❌ Не удалось подготовить ответ.")
-                return
-            finally:
-                progress_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await progress_task
+            async with self.progress.track(message) as status_message:
+                try:
+                    runtime_context = await self._runtime_context(message)
+                    response = await self.agent.ainvoke(
+                        prompt,
+                        session_id=session_id,
+                        runtime_context=runtime_context,
+                    )
+                except LLMProviderError, AgentToolError, SQLAlchemyError:
+                    logger.exception(
+                        "LLM request failed chat_id=%s after %.1fs",
+                        message.chat.id,
+                        monotonic() - started_at,
+                    )
+                    await status_message.edit_text("❌ Не удалось подготовить ответ.")
+                    return
 
             logger.info(
                 "LLM response received chat_id=%s after %.1fs characters=%d",
@@ -134,21 +148,7 @@ class TelegramAgentBot:
                 monotonic() - started_at,
                 len(response) if isinstance(response, str) else 0,
             )
-            if isinstance(response, MemeResult):
-                await status_message.delete()
-                await message.answer_photo(response.url)
-                logger.info(
-                    "Meme sent chat_id=%s meme_id=%s total_time=%.1fs",
-                    message.chat.id,
-                    response.id,
-                    monotonic() - started_at,
-                )
-                return
-            chunks_sent = await self._replace_status_with_response(
-                message,
-                status_message,
-                response,
-            )
+            chunks_sent = await self.renderer.send(message, status_message, response)
             logger.info(
                 "Response sent chat_id=%s chunks=%d total_time=%.1fs",
                 message.chat.id,
@@ -156,61 +156,22 @@ class TelegramAgentBot:
                 monotonic() - started_at,
             )
 
-    @staticmethod
-    async def _update_request_status(
-        status_message: Message,
-        started_at: float,
-    ) -> None:
-        """Periodically update one Telegram message while the LLM is working."""
-        update_index = 0
-        while True:
-            await asyncio.sleep(STATUS_UPDATE_INTERVAL)
-            elapsed = monotonic() - started_at
-            status = STATUS_MESSAGES[update_index % len(STATUS_MESSAGES)]
-            update_index += 1
-
-            try:
-                await status_message.edit_text(
-                    f"{status}\n\nПрошло: {elapsed:.0f} сек."
-                )
-            except TelegramAPIError:
-                logger.warning(
-                    "Failed to update status chat_id=%s",
-                    status_message.chat.id,
-                    exc_info=True,
-                )
-
-            logger.info(
-                "LLM request still running chat_id=%s elapsed=%.1fs",
-                status_message.chat.id,
-                elapsed,
-            )
-
-    @staticmethod
-    async def _replace_status_with_response(
-        request_message: Message,
-        status_message: Message,
-        markdown: str,
-    ) -> int:
-        """Replace the progress status with a Telegram-formatted response."""
-        text, entities = convert(markdown)
-        chunks = split_entities(text, entities, max_utf16_len=4096)
-
-        for index, (chunk_text, chunk_entities) in enumerate(chunks):
-            telegram_entities = [
-                MessageEntity(**entity.to_dict()) for entity in chunk_entities
-            ]
-            if index == 0:
-                await status_message.edit_text(
-                    chunk_text,
-                    entities=telegram_entities,
-                )
-            else:
-                await request_message.answer(
-                    chunk_text,
-                    entities=telegram_entities,
-                )
-        return len(chunks)
+    async def _runtime_context(self, message: Message) -> AgentRuntimeContext:
+        """Build trusted tool metadata without exposing it to model arguments."""
+        settings = await self.calendar_service.get_settings(message.chat.id)
+        user = message.from_user
+        return AgentRuntimeContext(
+            chat_id=message.chat.id,
+            user_id=user.id if user is not None else None,
+            user_display_name=user.full_name if user is not None else None,
+            message_id=message.message_id,
+            current_time=datetime.now(UTC),
+            timezone=(
+                settings.timezone
+                if settings is not None
+                else self.calendar_default_timezone
+            ),
+        )
 
     def _extract_prompt(self, message: Message) -> str | None:
         """Return text without this bot's @mention, or None if not mentioned."""
@@ -237,31 +198,90 @@ async def run_bot() -> None:
     logger.info("Loading bot configuration")
     settings = TelegramSettings()  # type: ignore[call-arg]
     humor_api_settings = HumorAPISettings()  # type: ignore[call-arg]
+    database_settings = DatabaseSettings()  # type: ignore[call-arg]
+    reminder_settings = ReminderWorkerSettings()
     logger.info("Configuration loaded allowed_chats=%d", len(settings.chat_ids))
 
-    async with (
-        Bot(token=settings.bot_token.get_secret_value()) as telegram_bot,
-        OpenRouterProvider() as provider,
-    ):
-        logger.info("Connecting to Telegram")
-        bot_user = await telegram_bot.get_me()
-        if bot_user.username is None:
-            raise RuntimeError("Telegram bot must have a username")
+    database_engine = create_database_engine(database_settings)
+    calendar_service = CalendarService(
+        SqlAlchemyCalendarUnitOfWorkFactory(create_session_factory(database_engine))
+    )
+    reminder_unit_of_work_factory = SqlAlchemyReminderUnitOfWorkFactory(
+        create_session_factory(database_engine)
+    )
+    try:
+        async with (
+            Bot(token=settings.bot_token.get_secret_value()) as telegram_bot,
+            OpenRouterProvider() as provider,
+        ):
+            logger.info("Connecting to Telegram")
+            bot_user = await telegram_bot.get_me()
+            if bot_user.username is None:
+                raise RuntimeError("Telegram bot must have a username")
 
-        application = TelegramAgentBot(
-            agent=Agent(provider, tools=(SendMemeTool(humor_api_settings),)),
-            bot_username=bot_user.username,
-            allowed_chat_ids=settings.chat_ids,
-        )
-        dispatcher = Dispatcher()
-        application.register(dispatcher)
+            reminder_worker = ReminderWorker(
+                reminder_unit_of_work_factory,
+                TelegramReminderSender(telegram_bot),
+                worker_id=(f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"),
+                options=reminder_settings.worker_options,
+            )
+            reminder_task = asyncio.create_task(
+                reminder_worker.run(), name="reminder-worker"
+            )
+            polling_task: asyncio.Task[None] | None = None
+            try:
+                application = TelegramAgentBot(
+                    agent=Agent(
+                        provider,
+                        additional_system_prompts=(load_system_prompt(),),
+                        tools=(
+                            SendMemeTool(humor_api_settings),
+                            *calendar_tools(calendar_service),
+                        ),
+                    ),
+                    bot_username=bot_user.username,
+                    allowed_chat_ids=settings.chat_ids,
+                    calendar_service=calendar_service,
+                    calendar_default_timezone=settings.calendar_default_timezone,
+                )
+                dispatcher = Dispatcher()
+                application.register(dispatcher)
 
-        logger.info(
-            "Starting @%s in %d allowed chats",
-            bot_user.username,
-            len(settings.chat_ids),
-        )
-        await dispatcher.start_polling(telegram_bot)
+                logger.info(
+                    "Starting @%s in %d allowed chats",
+                    bot_user.username,
+                    len(settings.chat_ids),
+                )
+                polling_task = asyncio.create_task(
+                    dispatcher.start_polling(telegram_bot),
+                    name="telegram-polling",
+                )
+                done, _ = await asyncio.wait(
+                    (polling_task, reminder_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if reminder_task in done:
+                    await reminder_task
+                    raise RuntimeError("reminder worker stopped unexpectedly")
+                await polling_task
+            finally:
+                reminder_worker.request_stop()
+                if polling_task is not None and not polling_task.done():
+                    polling_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await polling_task
+                try:
+                    await asyncio.wait_for(
+                        reminder_task,
+                        timeout=reminder_settings.shutdown_timeout,
+                    )
+                except TimeoutError:
+                    logger.warning("Reminder worker graceful shutdown timed out")
+                    reminder_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await reminder_task
+    finally:
+        await database_engine.dispose()
 
 
 def main() -> None:

@@ -15,6 +15,12 @@ Telegram-бот с диалоговым AI-агентом на LangGraph. Аге
 - интерактивный статус подготовки ответа с обновлением каждые 5 секунд;
 - преобразование Markdown от LLM в нативное форматирование Telegram;
 - безопасное разделение длинных ответов с учётом лимита Telegram;
+- отдельный постоянный календарь для каждого `chat_id` в PostgreSQL;
+- создание, просмотр, поиск, изменение и отмена событий;
+- cursor-пагинация будущих событий по 10 записей;
+- пользовательский текст и несколько напоминаний для одного события;
+- надёжная фоновая доставка напоминаний с lease, retries и backoff;
+- восстановление зависших доставок после перезапуска;
 - системный промпт из отдельного YAML-файла;
 - подробные логи обработки запросов.
 
@@ -23,8 +29,9 @@ Telegram-бот с диалоговым AI-агентом на LangGraph. Аге
 - Python `3.14`;
 - Poetry;
 - токен Telegram-бота от BotFather;
-- API-ключ OpenRouter.
-- API-ключ Humor API.
+- API-ключ OpenRouter;
+- API-ключ Humor API;
+- PostgreSQL `17` — при Docker-запуске создаётся автоматически.
 
 ## Рекомендуемые требования к VPS
 
@@ -110,7 +117,45 @@ HUMOR_API_USER_AGENT=ai-helper/0.1
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_ALLOWED_CHAT_IDS=-1001234567890,123456789
+TELEGRAM_CALENDAR_DEFAULT_TIMEZONE=Europe/Moscow
+
+# PostgreSQL
+POSTGRES_DB=ai_helper
+POSTGRES_USER=ai_helper
+POSTGRES_PASSWORD=replace-with-a-strong-password
+DATABASE_URL=postgresql+asyncpg://ai_helper:replace-with-a-strong-password@postgres:5432/ai_helper
+DATABASE_POOL_SIZE=5
+DATABASE_MAX_OVERFLOW=5
+DATABASE_POOL_TIMEOUT=30
+
+# Reminder worker
+REMINDER_POLL_INTERVAL=10
+REMINDER_BATCH_SIZE=20
+REMINDER_LEASE_TIMEOUT_SECONDS=300
+REMINDER_MAX_ATTEMPTS=5
+REMINDER_RETRY_BASE_DELAY_SECONDS=30
+REMINDER_RETRY_MAX_DELAY_SECONDS=3600
+REMINDER_RETRY_JITTER_RATIO=0.1
+REMINDER_SHUTDOWN_TIMEOUT=30
 ```
+
+`POSTGRES_*` используются контейнером PostgreSQL при первичной инициализации,
+а `DATABASE_*` — приложением и Alembic. Пароль в `DATABASE_URL` должен совпадать
+с `POSTGRES_PASSWORD`. Если пароль содержит специальные символы URL, их нужно
+закодировать.
+
+`TELEGRAM_CALENDAR_DEFAULT_TIMEZONE` — IANA-таймзона для чата, пока у него нет
+сохранённой настройки календаря. После первого календарного действия настройка
+чата хранится в PostgreSQL и не зависит от контекста LangGraph.
+
+Параметры `REMINDER_*` управляют встроенным worker-ом: частотой опроса, размером
+пачки, временем lease, количеством попыток, backoff и временем graceful shutdown.
+Worker использует PostgreSQL как источник истины и после перезапуска восстанавливает
+зависшие доставки по истечении lease.
+
+`REMINDER_POLL_INTERVAL` задаёт максимальную задержку между наступлением времени
+напоминания и началом попытки доставки. При значении `10` нормальна задержка до
+10 секунд относительно отображаемой минуты.
 
 ### Разрешённые чаты
 
@@ -143,9 +188,22 @@ venv/bin/python -m bot
 docker compose up --build -d
 ```
 
-Бот работает через long polling, поэтому публиковать порты контейнера не нужно.
-Compose передаёт переменные из `.env` внутрь контейнера. Сам `.env` исключён из
-контекста сборки через `.dockerignore` и не попадает в Docker-образ.
+Compose запускает отдельный PostgreSQL-контейнер с постоянным именованным volume,
+дожидается готовности БД, применяет миграции Alembic одноразовым сервисом
+`migrate` и только затем запускает бота. Бот работает через long polling, поэтому
+публиковать порты приложения и PostgreSQL не нужно. Compose передаёт переменные
+из `.env` внутрь контейнеров. Сам `.env` исключён из контекста сборки через
+`.dockerignore` и не попадает в Docker-образ.
+
+Worker напоминаний запускается внутри процесса бота отдельной фоновой задачей. Он
+не зависит от активного диалога или контекста LangGraph: сообщение формируется из
+сохранённых события и `message_text`, после чего отправляется напрямую через
+Telegram Bot API.
+
+Задача worker-а контролируется вместе с Telegram polling. Если worker неожиданно
+завершится, процесс бота также завершится, после чего Docker перезапустит контейнер.
+Это не позволяет боту продолжать отвечать на сообщения с незаметно остановившейся
+доставкой напоминаний.
 
 Просмотр логов в реальном времени:
 
@@ -165,10 +223,57 @@ docker compose ps
 docker compose down
 ```
 
+Эта команда сохраняет PostgreSQL volume. Для удаления данных БД требуется явно
+добавить `--volumes`; используйте это только если данные действительно больше не
+нужны.
+
 После изменения исходного кода или зависимостей пересоберите образ:
 
 ```bash
 docker compose up --build -d
+```
+
+### Миграции PostgreSQL
+
+При обычном запуске Compose миграции применяются автоматически сервисом
+`migrate`. Локально их можно запустить из существующего `venv`, указав доступный
+с хоста адрес PostgreSQL в `DATABASE_URL`:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://user:password@127.0.0.1:5432/database \
+  venv/bin/python -m alembic upgrade head
+```
+
+Текущая ревизия и история:
+
+```bash
+venv/bin/python -m alembic current
+venv/bin/python -m alembic history
+```
+
+### Тестовая PostgreSQL-среда
+
+Тестовая БД запускается отдельно, использует порт `55432` только на localhost и
+хранит данные в `tmpfs`. Она не использует production volume:
+
+```bash
+docker compose -f docker-compose.test.yaml up -d --wait
+```
+
+Применение миграций и запуск всех тестов с проверкой реальной схемы:
+
+```bash
+DATABASE_URL=postgresql+asyncpg://ai_helper_test:ai_helper_test@127.0.0.1:55432/ai_helper_test \
+  venv/bin/python -m alembic upgrade head
+
+DATABASE_TEST_URL=postgresql+asyncpg://ai_helper_test:ai_helper_test@127.0.0.1:55432/ai_helper_test \
+  venv/bin/python -m unittest discover -s tests -v
+```
+
+Остановка и удаление тестовой среды:
+
+```bash
+docker compose -f docker-compose.test.yaml down
 ```
 
 Контейнер запускается от непривилегированного пользователя и автоматически
@@ -183,6 +288,10 @@ docker compose up --build -d
 - периодический статус долгого запроса;
 - время получения и отправки ответа;
 - запросы мемов и отправка изображений;
+- запуск и остановка reminder worker-а;
+- резервирование каждой наступившей доставки;
+- успешная отправка с Telegram message ID;
+- временные ошибки, повторные попытки и постоянные отказы доставки;
 - ротация сессии после сброса;
 - ошибки Telegram, OpenRouter и Humor API.
 
@@ -210,6 +319,88 @@ docker compose up --build -d
 готовый мем по одному английскому ключевому слову. За один запрос Humor API
 возвращается не более одного результата. Изображение отправляется без подписи.
 
+### Календарь
+
+У каждого Telegram-чата собственный календарь. События и напоминания хранятся в
+PostgreSQL и не удаляются при `/reset` или перезапуске бота. `chat_id` и ID
+пользователя поступают из доверенного Telegram-контекста и не задаются моделью.
+
+Создание события с напоминаниями:
+
+```text
+@bot_username Запиши поездку в ветеринарную клинику на 18 августа в 12:00.
+Напомни за день текстом «Подготовить документы Фикса» и за час текстом
+«Взять Фикса и результаты анализов».
+```
+
+Если пользователь просит напоминание, но не указывает момент отправки, агент
+сначала задаёт уточняющий вопрос. Успешное подтверждение формируется из данных,
+фактически сохранённых в PostgreSQL.
+
+Просмотр ближайших событий:
+
+```text
+@bot_username Покажи ближайшие события
+```
+
+События сортируются от ближайшего к позднему и выводятся страницами по 10. Если
+есть продолжение, можно написать `покажи следующие`. Технические `event_id`,
+`version` и cursor пользователю не показываются.
+
+Изменение события по свободному описанию:
+
+```text
+@bot_username Перенеси поездку с Фиксом к ветеринару на 14:00
+```
+
+Пользователь не обязан помнить точное название. Агент ищет характерные слова в
+названии и описании события. Если найден один неочевидный кандидат, бот просит
+подтвердить его. Если подходят несколько событий, бот показывает варианты и
+ничего не изменяет до выбора пользователя.
+
+Добавление напоминания к существующему событию:
+
+```text
+@bot_username Добавь к поездке с Фиксом напоминание за два часа с текстом
+«Позвонить в клинику и подтвердить запись»
+```
+
+Для этого используется отдельная транзакционная операция
+`add_calendar_reminders`: она добавляет новые напоминания и не удаляет уже
+существующие. Фраза «Напоминание добавлено» может быть показана только после
+успешного вызова инструмента и записи в БД.
+
+Отмена события выполняется мягко: событие остаётся в БД для аудита, а его
+открытые напоминания получают статус `cancelled` и не доставляются.
+
+### Доставка напоминаний
+
+Worker независимо от LLM и активности диалога опрашивает PostgreSQL и выбирает
+наступившие напоминания через `FOR UPDATE SKIP LOCKED`. Перед отправкой запись
+получает статус `processing`, lease и идентификатор worker-а.
+
+После попытки возможны состояния:
+
+- `sent` — Telegram принял сообщение, сохранён `telegram_message_id`;
+- `pending` — временная ошибка, назначена следующая попытка с backoff;
+- `failed` — постоянная ошибка или исчерпаны попытки;
+- `cancelled` — событие отменено либо его расписание заменено;
+- `processing` — доставка зарезервирована; просроченный lease восстанавливается
+  после перезапуска.
+
+Доставка имеет семантику at-least-once: при аварии между отправкой в Telegram и
+фиксацией `sent` возможно повторное сообщение. Потерянные после перезапуска
+напоминания восстанавливаются по lease.
+
+Для диагностики конкретной доставки смотрите логи:
+
+```bash
+docker compose logs --since=30m bot
+```
+
+Ключевые записи: `Reminder delivery started`, `Reminder delivery completed`,
+`temporarily failed`, `permanently rejected` и итоговая строка итерации worker-а.
+
 ### Контекст чата
 
 Каждому разрешённому чату соответствует отдельная UUID-сессия LangGraph. В
@@ -233,7 +424,8 @@ docker compose up --build -d
 3. Создаёт для чата новую пустую UUID-сессию.
 
 Контексты других чатов не затрагиваются. Без ручного сброса история активной
-сессии продолжает расти до перезапуска процесса.
+сессии продолжает расти до перезапуска процесса. Сброс контекста не меняет
+календарь и не отменяет напоминания.
 
 ## Архитектура
 
@@ -241,20 +433,39 @@ docker compose up --build -d
 ai_helper/
 ├── agent/
 │   ├── agent.py              # LangGraph-агент и управление контекстом
+│   ├── calendar_tools.py     # адаптеры календарных инструментов агента
 │   ├── providers.py          # провайдер OpenRouter
 │   ├── settings.py           # настройки OpenRouter и Humor API
 │   ├── tools.py              # инструменты агента и получение мемов
 │   └── prompts/
-│       ├── __init__.py       # загрузка и валидация промптов
-│       └── system.yaml       # системный промпт агента
+│       ├── system.yaml       # общие правила, календарь и подтверждения
+│       └── tools.yaml        # описания инструментов для модели
 ├── bot/
 │   ├── __main__.py           # запуск через python -m bot
-│   ├── bot.py                # aiogram handlers и управление сессиями
-│   └── settings.py           # настройки Telegram
+│   ├── bot.py                # composition root, aiogram и worker lifecycle
+│   ├── reminders.py          # Telegram-адаптер доставки напоминаний
+│   ├── rendering.py          # Markdown и разбиение ответов
+│   └── settings.py           # настройки Telegram и reminder worker-а
+├── calendar_app/
+│   ├── domain.py             # события, напоминания, статусы и запросы
+│   ├── ports.py              # порты репозитория и Unit of Work
+│   └── service.py            # транзакционные календарные сценарии
+├── reminder_app/
+│   ├── domain.py             # данные независимой доставки
+│   ├── ports.py              # очередь и sender
+│   └── worker.py             # lease, retries, backoff и polling
+├── database/
+│   ├── calendar.py           # SQLAlchemy-репозиторий календаря
+│   ├── reminders.py          # PostgreSQL-очередь worker-а
+│   ├── models.py             # ORM-модели и индексы
+│   └── settings.py           # настройки подключения
+├── migrations/               # миграции Alembic
+├── tests/                    # unit- и PostgreSQL-интеграционные тесты
 ├── .env.example
 ├── .dockerignore
 ├── Dockerfile
 ├── docker-compose.yaml
+├── docker-compose.test.yaml
 ├── pyproject.toml
 └── poetry.lock
 ```
@@ -269,8 +480,19 @@ Telegram message
     → LangGraph
     → OpenRouterProvider
     → вызов выбранного моделью инструмента (если нужен)
+    → CalendarService → Unit of Work → PostgreSQL (для календарных действий)
     → текст: преобразование Markdown и редактирование статусного сообщения
     → мем: отправка изображения в Telegram без подписи
+```
+
+Поток доставки напоминания не проходит через LLM:
+
+```text
+PostgreSQL event_reminders
+    → reserve due batch + lease
+    → TelegramReminderSender
+    → Telegram Bot API
+    → sent / pending with backoff / failed
 ```
 
 `Agent` зависит не от OpenRouter напрямую, а от протокола `LLMProvider`. Для
@@ -288,12 +510,17 @@ agent/prompts/system.yaml
 Он загружается и валидируется при создании агента. Текст системного промпта не
 захардкожен в `agent.py`.
 
+Описания и параметры инструментов находятся в `agent/prompts/tools.yaml`.
+Служебные ID, версии событий и cursor хранятся отдельно от видимой истории и
+передаются модели системным состоянием только для продолжения операции. В
+Telegram эти значения не выводятся.
+
 ## Проверки перед коммитом
 
 Запустить все проверки:
 
 ```bash
-pre-commit run --all-files
+venv/bin/python -m pre_commit run --all-files
 ```
 
 В проекте настроены Ruff, проверка форматирования, проверка YAML/TOML и проверка
