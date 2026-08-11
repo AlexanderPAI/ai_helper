@@ -10,17 +10,35 @@ from urllib.parse import parse_qs, urlparse
 from pydantic import AnyHttpUrl, SecretStr
 
 from agent.place_tools import SearchPlacesTool
+from agent.providers import LLMResponse, UrlCitation
 from agent.results import MediaResult
 from agent.settings import HumorAPISettings, OpenRouterWebSearchSettings
 from agent.tools import SendMemeTool
 
 
-class _UnusedProvider:
+class _PlacesProvider:
+    def __init__(self) -> None:
+        self.calls = []
+
     def generate(self, messages, **options):
-        raise AssertionError("placeholder must not call the provider")
+        self.calls.append((messages, options))
+        return self._response()
 
     async def agenerate(self, messages, **options):
-        raise AssertionError("placeholder must not call the provider")
+        self.calls.append((messages, options))
+        return self._response()
+
+    @staticmethod
+    def _response() -> LLMResponse:
+        return LLMResponse(
+            content="Нашёл **Бар** на Тверской.",
+            citations=(
+                UrlCitation(
+                    url="https://example.test/bar",
+                    title="Бар — официальный сайт",
+                ),
+            ),
+        )
 
 
 class _Response(BytesIO):
@@ -140,7 +158,8 @@ class SendMemeToolTest(unittest.TestCase):
 
 class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        self.tool = SearchPlacesTool(_UnusedProvider(), OpenRouterWebSearchSettings())
+        self.provider = _PlacesProvider()
+        self.tool = SearchPlacesTool(self.provider, OpenRouterWebSearchSettings())
 
     def test_schema_is_loaded_from_yaml(self) -> None:
         schema = self.tool.schema["function"]
@@ -161,12 +180,24 @@ class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_placeholder_does_not_call_provider(self) -> None:
+    async def test_search_uses_server_tool_and_returns_citations(self) -> None:
         result = await self.tool.ainvoke(
             {"query": "спокойная кальянная", "location": "Москва"}
         )
 
-        self.assertEqual(result, "Поиск мест пока не подключён.")
+        self.assertIn("Нашёл **Бар**", result)
+        self.assertIn("[Бар — официальный сайт](https://example.test/bar)", result)
+        messages, options = self.provider.calls[0]
+        self.assertIn("Локация: Москва", messages[1]["content"])
+        self.assertEqual(options["tools"], [self.tool.web_search_tool])
+
+    async def test_missing_city_asks_user_without_searching(self) -> None:
+        result = await self.tool.ainvoke(
+            {"query": "спокойная кальянная", "location": "рядом со мной"}
+        )
+
+        self.assertEqual(result, "В каком городе искать места?")
+        self.assertEqual(self.provider.calls, [])
 
 
 if __name__ == "__main__":
