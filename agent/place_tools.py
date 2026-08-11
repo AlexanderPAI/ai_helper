@@ -33,10 +33,12 @@ _SEARCH_SYSTEM_PROMPT = """
 доказательством того, что заведение продолжает работать.
 
 Верни не больше запрошенного числа вариантов. Для каждого укажи название, адрес
-или район, почему место подходит, подтверждённый режим работы и ценовой ориентир,
-если они найдены, а также ссылку на источник. Не придумывай отсутствующие данные
-и явно отмечай то, что не удалось подтвердить. Не показывай внутренние поисковые
-запросы и технические сведения.
+и прямую ссылку на официальный сайт или официальную страницу заведения, а также
+почему место подходит, подтверждённый режим работы и ценовой ориентир, если они
+найдены. Оформляй название, адрес и сайт явно, чтобы выбранный вариант можно было
+добавить в календарь. Не придумывай отсутствующие данные и отмечай то, что не
+удалось подтвердить. Не показывай внутренние поисковые запросы и технические
+сведения.
 """.strip()
 
 
@@ -90,8 +92,14 @@ class SearchPlacesTool:
                             "default": 5,
                             "description": self.prompt.parameter_descriptions["limit"],
                         },
+                        "is_food_service": {
+                            "type": "boolean",
+                            "description": self.prompt.parameter_descriptions[
+                                "is_food_service"
+                            ],
+                        },
                     },
-                    "required": ["query", "location"],
+                    "required": ["query", "location", "is_food_service"],
                     "additionalProperties": False,
                 },
             },
@@ -107,12 +115,12 @@ class SearchPlacesTool:
         parsed = self._parse_arguments(arguments)
         if parsed is None:
             return self._location_question()
-        query, location, limit = parsed
+        query, location, limit, is_food_service = parsed
         response = self.search_provider.generate(
             self._messages(query, location, limit, context),
             tools=[self.web_search_tool],
         )
-        return self._format_response(response)
+        return self._format_response(response, is_food_service=is_food_service)
 
     async def ainvoke(
         self,
@@ -124,20 +132,21 @@ class SearchPlacesTool:
         parsed = self._parse_arguments(arguments)
         if parsed is None:
             return self._location_question()
-        query, location, limit = parsed
+        query, location, limit, is_food_service = parsed
         response = await self.search_provider.agenerate(
             self._messages(query, location, limit, context),
             tools=[self.web_search_tool],
         )
-        return self._format_response(response)
+        return self._format_response(response, is_food_service=is_food_service)
 
     @staticmethod
     def _parse_arguments(
         arguments: Mapping[str, Any],
-    ) -> tuple[str, str, int] | None:
+    ) -> tuple[str, str, int, bool] | None:
         query = arguments.get("query")
         location = arguments.get("location")
         limit = arguments.get("limit", 5)
+        is_food_service = arguments.get("is_food_service")
         if not isinstance(query, str) or not query.strip():
             raise AgentToolError("search_places query must be a non-empty string")
         if not isinstance(location, str) or not location.strip():
@@ -150,7 +159,9 @@ class SearchPlacesTool:
             or not 1 <= limit <= 10
         ):
             raise AgentToolError("search_places limit must be an integer from 1 to 10")
-        return query.strip(), location.strip(), limit
+        if not isinstance(is_food_service, bool):
+            raise AgentToolError("search_places is_food_service must be a boolean")
+        return query.strip(), location.strip(), limit, is_food_service
 
     @staticmethod
     def _messages(
@@ -178,7 +189,7 @@ class SearchPlacesTool:
         ]
 
     @staticmethod
-    def _format_response(response: LLMResponse) -> str:
+    def _format_response(response: LLMResponse, *, is_food_service: bool) -> str:
         if not isinstance(response, LLMResponse):
             raise TypeError("place search provider must return an LLMResponse")
         content = response.content.strip()
@@ -188,13 +199,18 @@ class SearchPlacesTool:
         unseen = [
             citation for citation in response.citations if citation.url not in content
         ]
-        if not unseen:
-            return content
-        sources = "\n".join(
-            f"- [{SearchPlacesTool._citation_title(citation)}]({citation.url})"
-            for citation in unseen
-        )
-        return f"{content}\n\n**Источники**\n\n{sources}"
+        if unseen:
+            sources = "\n".join(
+                f"- [{SearchPlacesTool._citation_title(citation)}]({citation.url})"
+                for citation in unseen
+            )
+            content = f"{content}\n\n**Источники**\n\n{sources}"
+        if is_food_service:
+            content = (
+                f"{content}\n\nХотите запланировать посещение одного из этих "
+                "заведений в календаре?"
+            )
+        return content
 
     @staticmethod
     def _citation_title(citation: UrlCitation) -> str:

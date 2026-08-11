@@ -166,7 +166,10 @@ class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(schema["name"], "search_places")
         self.assertEqual(schema["description"], self.tool.prompt.description)
-        self.assertEqual(set(schema["parameters"]["required"]), {"query", "location"})
+        self.assertEqual(
+            set(schema["parameters"]["required"]),
+            {"query", "location", "is_food_service"},
+        )
         self.assertEqual(
             self.tool.web_search_tool,
             {
@@ -182,18 +185,27 @@ class SearchPlacesToolTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_search_uses_server_tool_and_returns_citations(self) -> None:
         result = await self.tool.ainvoke(
-            {"query": "спокойная кальянная", "location": "Москва"}
+            {
+                "query": "спокойная кальянная",
+                "location": "Москва",
+                "is_food_service": True,
+            }
         )
 
         self.assertIn("Нашёл **Бар**", result)
         self.assertIn("[Бар — официальный сайт](https://example.test/bar)", result)
+        self.assertIn("запланировать посещение", result)
         messages, options = self.provider.calls[0]
         self.assertIn("Локация: Москва", messages[1]["content"])
         self.assertEqual(options["tools"], [self.tool.web_search_tool])
 
     async def test_missing_city_asks_user_without_searching(self) -> None:
         result = await self.tool.ainvoke(
-            {"query": "спокойная кальянная", "location": "рядом со мной"}
+            {
+                "query": "спокойная кальянная",
+                "location": "рядом со мной",
+                "is_food_service": True,
+            }
         )
 
         self.assertEqual(result, "В каком городе искать места?")

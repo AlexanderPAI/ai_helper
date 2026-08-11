@@ -9,6 +9,7 @@ import json
 from collections.abc import Awaitable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -109,6 +110,7 @@ class CreateCalendarEventTool(_CalendarTool):
             {
                 "title": _string(self._parameter("title"), max_length=255),
                 "description": _string(self._parameter("description"), max_length=4000),
+                "place": _place_schema(self._parameter("place")),
                 "starts_at_local": _string(self._parameter("starts_at_local")),
                 "timezone": _string(self._parameter("timezone"), max_length=64),
                 "reminders": _reminders_schema(self._parameter("reminders")),
@@ -135,7 +137,9 @@ class CreateCalendarEventTool(_CalendarTool):
         request = CreateEvent(
             chat_id=runtime.chat_id,
             title=_required_string(arguments, "title"),
-            description=_optional_string(arguments, "description"),
+            description=_description_with_place(
+                _optional_string(arguments, "description"), arguments
+            ),
             starts_at=_local_datetime(arguments, "starts_at_local"),
             timezone=timezone,
             created_by_user_id=runtime.user_id,
@@ -339,6 +343,7 @@ class UpdateCalendarEventTool(_CalendarTool):
                     "anyOf": [{"type": "string", "maxLength": 4000}, {"type": "null"}],
                     "description": self._parameter("description"),
                 },
+                "place": _place_schema(self._parameter("place")),
                 "starts_at_local": _string(self._parameter("starts_at_local")),
                 "timezone": _string(self._parameter("timezone"), max_length=64),
                 "reminders": _reminders_schema(self._parameter("reminders")),
@@ -364,6 +369,7 @@ class UpdateCalendarEventTool(_CalendarTool):
         changes = {
             "title",
             "description",
+            "place",
             "starts_at_local",
             "timezone",
             "reminders",
@@ -377,11 +383,7 @@ class UpdateCalendarEventTool(_CalendarTool):
             title=(
                 _required_string(arguments, "title") if "title" in arguments else UNSET
             ),
-            description=(
-                _nullable_string(arguments, "description")
-                if "description" in arguments
-                else UNSET
-            ),
+            description=_updated_description(arguments),
             starts_at=(
                 _local_datetime(arguments, "starts_at_local")
                 if "starts_at_local" in arguments
@@ -518,6 +520,25 @@ def _reminders_schema(description: str) -> dict[str, Any]:
     }
 
 
+def _place_schema(description: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": description,
+        "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 255},
+            "address": {"type": "string", "minLength": 1, "maxLength": 500},
+            "website": {
+                "type": "string",
+                "format": "uri",
+                "minLength": 1,
+                "maxLength": 1000,
+            },
+        },
+        "required": ["name", "address", "website"],
+        "additionalProperties": False,
+    }
+
+
 def _required_string(arguments: Mapping[str, Any], name: str) -> str:
     value = arguments.get(name)
     if not isinstance(value, str) or not value.strip():
@@ -544,6 +565,45 @@ def _nullable_string(arguments: Mapping[str, Any], name: str) -> str | None:
     if arguments.get(name) is None:
         return None
     return _required_string(arguments, name)
+
+
+def _updated_description(arguments: Mapping[str, Any]) -> Any:
+    if "place" in arguments:
+        if "description" not in arguments:
+            raise AgentToolError(
+                "adding a place requires the current description or null"
+            )
+        return _description_with_place(
+            _nullable_string(arguments, "description"), arguments
+        )
+    if "description" in arguments:
+        return _nullable_string(arguments, "description")
+    return UNSET
+
+
+def _description_with_place(
+    description: str | None,
+    arguments: Mapping[str, Any],
+) -> str | None:
+    if "place" not in arguments:
+        return description
+    raw_place = arguments["place"]
+    if not isinstance(raw_place, Mapping):
+        raise AgentToolError("place must be an object")
+    name = _required_string(raw_place, "name")
+    address = _required_string(raw_place, "address")
+    website = _required_string(raw_place, "website")
+    parsed_website = urlsplit(website)
+    if parsed_website.scheme not in {"http", "https"} or not parsed_website.netloc:
+        raise AgentToolError("place website must be an HTTP(S) URL")
+
+    place_block = f"Название: {name}\nАдрес: {address}\nСайт: {website}"
+    combined = (
+        f"{description.rstrip()}\n\n{place_block}" if description else place_block
+    )
+    if len(combined) > 4000:
+        raise AgentToolError("description with place must not exceed 4000 characters")
+    return combined
 
 
 def _required_int(arguments: Mapping[str, Any], name: str) -> int:

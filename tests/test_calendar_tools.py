@@ -138,6 +138,34 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(str(saved.id), result.markdown)
         self.assertNotIn("версия", result.markdown.casefold())
 
+    async def test_create_appends_place_after_custom_description(self) -> None:
+        service = Mock()
+        service.create_event = AsyncMock(return_value=event())
+        tool = CreateCalendarEventTool(service)
+
+        await tool.ainvoke(
+            {
+                "title": "Ужин",
+                "description": "Встреча с друзьями",
+                "starts_at_local": "2026-08-08T19:00:00",
+                "place": {
+                    "name": "Кафе Север",
+                    "address": "Москва, Тверская улица, 1",
+                    "website": "https://example.test/cafe",
+                },
+            },
+            context=runtime_context(),
+        )
+
+        request = service.create_event.await_args.args[0]
+        self.assertEqual(
+            request.description,
+            "Встреча с друзьями\n\n"
+            "Название: Кафе Север\n"
+            "Адрес: Москва, Тверская улица, 1\n"
+            "Сайт: https://example.test/cafe",
+        )
+
     async def test_list_is_chronological_and_hides_internal_fields_from_user(
         self,
     ) -> None:
@@ -235,6 +263,34 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
         for result in (get_result, update_result, cancel_result):
             self.assertNotIn(str(current.id), result.markdown)
             self.assertNotIn("версия", result.markdown.casefold())
+
+    async def test_update_appends_place_after_existing_description(self) -> None:
+        service = Mock()
+        current = event(version=3)
+        service.update_event = AsyncMock(return_value=current)
+
+        await UpdateCalendarEventTool(service).ainvoke(
+            {
+                "event_id": str(current.id),
+                "expected_version": 3,
+                "description": "Продление договора",
+                "place": {
+                    "name": "Кафе Север",
+                    "address": "Москва, Тверская улица, 1",
+                    "website": "https://example.test/cafe",
+                },
+            },
+            context=runtime_context(),
+        )
+
+        request = service.update_event.await_args.args[0]
+        self.assertEqual(
+            request.description,
+            "Продление договора\n\n"
+            "Название: Кафе Север\n"
+            "Адрес: Москва, Тверская улица, 1\n"
+            "Сайт: https://example.test/cafe",
+        )
 
     async def test_add_reminder_uses_dedicated_service_operation(self) -> None:
         service = Mock()
