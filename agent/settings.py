@@ -1,5 +1,7 @@
 """Application settings loaded from environment variables."""
 
+from typing import Literal
+
 from pydantic import AnyHttpUrl, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,6 +25,25 @@ class OpenRouterSettings(BaseSettings):
     site_url: AnyHttpUrl | None = None
     app_name: str | None = "ai-helper"
     timeout: float = Field(default=60.0, gt=0)
+
+
+class OpenRouterWebSearchSettings(BaseSettings):
+    """Limits for future searches through OpenRouter's server-side tool."""
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        env_prefix="OPENROUTER_WEB_SEARCH_",
+        env_ignore_empty=True,
+        extra="ignore",
+    )
+
+    engine: Literal["auto", "native", "exa", "parallel", "perplexity", "firecrawl"] = (
+        "exa"
+    )
+    max_results: int = Field(default=5, ge=1, le=10)
+    max_total_results: int = Field(default=10, ge=1, le=30)
+    max_characters: int = Field(default=2_000, ge=1, le=100_000)
 
 
 class HumorAPISettings(BaseSettings):
