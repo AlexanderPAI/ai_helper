@@ -22,11 +22,21 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class UrlCitation:
+    """A web source attached to a provider response."""
+
+    url: str
+    title: str
+    content: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class LLMResponse:
     """Text and tool calls returned by an LLM provider."""
 
     content: str = ""
     tool_calls: tuple[ToolCall, ...] = ()
+    citations: tuple[UrlCitation, ...] = ()
 
 
 class LLMProvider(Protocol):
@@ -144,7 +154,35 @@ class OpenRouterProvider(LLMProvider):
             )
             for tool_call in message.tool_calls or ()
         )
-        return LLMResponse(content=message.content or "", tool_calls=tool_calls)
+        citations = OpenRouterProvider._load_citations(
+            getattr(message, "annotations", None)
+        )
+        return LLMResponse(
+            content=message.content or "",
+            tool_calls=tool_calls,
+            citations=citations,
+        )
+
+    @staticmethod
+    def _load_citations(annotations: Any) -> tuple[UrlCitation, ...]:
+        citations: list[UrlCitation] = []
+        for annotation in annotations or ():
+            if getattr(annotation, "type", None) != "url_citation":
+                continue
+            citation = getattr(annotation, "url_citation", None)
+            url = getattr(citation, "url", None)
+            title = getattr(citation, "title", None)
+            content = getattr(citation, "content", None)
+            if not isinstance(url, str) or not isinstance(title, str):
+                continue
+            citations.append(
+                UrlCitation(
+                    url=url,
+                    title=title,
+                    content=content if isinstance(content, str) else None,
+                )
+            )
+        return tuple(citations)
 
     @staticmethod
     def _load_tool_arguments(arguments: str) -> Mapping[str, Any]:

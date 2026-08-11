@@ -12,15 +12,21 @@ from .calendar_tools import (
     calendar_tools,
 )
 from .context import AgentRuntimeContext
+from .place_tools import SearchPlacesTool
 from .providers import (
     LLMProvider,
     LLMProviderError,
     LLMResponse,
     OpenRouterProvider,
     ToolCall,
+    UrlCitation,
 )
 from .results import MediaResult, StructuredToolResult, ToolResult
-from .settings import HumorAPISettings, OpenRouterSettings
+from .settings import (
+    HumorAPISettings,
+    OpenRouterSettings,
+    OpenRouterWebSearchSettings,
+)
 from .tools import AgentTool, AgentToolError, SendMemeTool
 
 __all__ = [
@@ -40,11 +46,14 @@ __all__ = [
     "MediaResult",
     "OpenRouterProvider",
     "OpenRouterSettings",
+    "OpenRouterWebSearchSettings",
+    "SearchPlacesTool",
     "SendMemeTool",
     "StructuredToolResult",
     "ToolCall",
     "ToolResult",
     "UpdateCalendarEventTool",
+    "UrlCitation",
     "calendar_tools",
 ]
 
