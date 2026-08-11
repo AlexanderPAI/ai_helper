@@ -145,14 +145,33 @@ class ReminderWorker:
         )
 
     async def _deliver(self, reminder: ReminderDelivery) -> str:
+        logger.info(
+            "Reminder delivery started reminder_id=%s event_id=%s chat_id=%s "
+            "attempt=%d scheduled_at=%s",
+            reminder.reminder_id,
+            reminder.event_id,
+            reminder.chat_id,
+            reminder.attempts,
+            reminder.remind_at.isoformat(),
+        )
         try:
             external_message_id = await self.sender.send(reminder)
         except asyncio.CancelledError:
             raise
         except PermanentReminderDeliveryError as error:
+            logger.error(
+                "Reminder delivery permanently rejected reminder_id=%s error=%s",
+                reminder.reminder_id,
+                self._error_text(error),
+            )
             await self._mark_failed(reminder, error)
             return "failed"
         except TemporaryReminderDeliveryError as error:
+            logger.warning(
+                "Reminder delivery temporarily failed reminder_id=%s error=%s",
+                reminder.reminder_id,
+                self._error_text(error),
+            )
             return await self._retry_or_fail(reminder, error)
         except Exception as error:
             logger.exception(
@@ -176,6 +195,12 @@ class ReminderWorker:
                 "Reminder delivery result lost its lease reminder_id=%s worker_id=%s",
                 reminder.reminder_id,
                 self.worker_id,
+            )
+        else:
+            logger.info(
+                "Reminder delivery completed reminder_id=%s telegram_message_id=%s",
+                reminder.reminder_id,
+                external_message_id,
             )
         return "sent"
 

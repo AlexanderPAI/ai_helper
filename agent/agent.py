@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from operator import add
 from typing import Annotated, Any, TypedDict
@@ -27,6 +28,7 @@ class AgentState(TypedDict):
 
     messages: Annotated[list[Message], add]
     output: ToolResult
+    internal_tool_data: dict[str, Any]
 
 
 class Agent:
@@ -81,10 +83,13 @@ class Agent:
             **self._provider_options(),
         )
         output = self._response_output(response, context=context)
-        return {
+        update: AgentState = {
             "messages": [self._assistant_message(self._history_text(output))],
             "output": output,
         }
+        if isinstance(output, StructuredToolResult):
+            update["internal_tool_data"] = output.data
+        return update
 
     async def _acall_provider(
         self, state: AgentState, config: RunnableConfig
@@ -95,10 +100,13 @@ class Agent:
             **self._provider_options(),
         )
         output = await self._aresponse_output(response, context=context)
-        return {
+        update: AgentState = {
             "messages": [self._assistant_message(self._history_text(output))],
             "output": output,
         }
+        if isinstance(output, StructuredToolResult):
+            update["internal_tool_data"] = output.data
+        return update
 
     def _provider_options(self) -> dict[str, Any]:
         options = dict(self.provider_options)
@@ -116,7 +124,7 @@ class Agent:
         if not isinstance(response, LLMResponse):
             raise TypeError("provider must return an LLMResponse")
         if not response.tool_calls:
-            return response.content
+            return self._sanitize_model_output(response.content)
 
         results: list[ToolResult] = []
         for tool_call in response.tool_calls:
@@ -136,7 +144,7 @@ class Agent:
         if not isinstance(response, LLMResponse):
             raise TypeError("provider must return an LLMResponse")
         if not response.tool_calls:
-            return response.content
+            return self._sanitize_model_output(response.content)
 
         results = []
         for tool_call in response.tool_calls:
@@ -160,6 +168,15 @@ class Agent:
         return "\n\n".join(text_results)
 
     @staticmethod
+    def _sanitize_model_output(content: str) -> str:
+        return re.sub(
+            r"<internal_tool_data>.*?</internal_tool_data>",
+            "",
+            content,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+
+    @staticmethod
     def _history_text(output: ToolResult) -> str:
         if isinstance(output, MediaResult):
             return f"[Отправлен медиафайл, id={output.id}]"
@@ -180,6 +197,14 @@ class Agent:
                 {
                     "role": "system",
                     "content": self._runtime_prompt(context),
+                }
+            )
+        internal_tool_data = state.get("internal_tool_data")
+        if internal_tool_data:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": self._internal_tool_prompt(internal_tool_data),
                 }
             )
         return [*messages, *state["messages"]]
@@ -221,6 +246,18 @@ class Agent:
             "Используй эти дату, время и таймзону для относительных выражений. "
             "Идентификаторы чата и пользователя инструменты получают напрямую "
             "от приложения — не спрашивай их и не передавай в аргументах."
+        )
+
+    @staticmethod
+    def _internal_tool_prompt(data: Mapping[str, Any]) -> str:
+        import json
+
+        serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        return (
+            "Служебное состояние последнего календарного инструмента. "
+            "Используй его только для аргументов следующего инструмента. Никогда "
+            "не показывай и не цитируй его пользователю:\n"
+            f"{serialized}"
         )
 
     def _thread_id(self, session_id: UUID | None = None) -> str:

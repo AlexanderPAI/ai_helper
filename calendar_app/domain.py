@@ -68,6 +68,18 @@ class CalendarEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class CalendarEventCursor:
+    starts_at: datetime
+    event_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarEventPage:
+    events: tuple[CalendarEvent, ...]
+    next_cursor: CalendarEventCursor | None
+
+
+@dataclass(frozen=True, slots=True)
 class ReminderDraft:
     """A reminder requested at an offset before an event."""
 
@@ -109,3 +121,11 @@ class UpdateEvent:
     starts_at: datetime | _UnsetType = UNSET
     timezone: str | _UnsetType = UNSET
     reminders: tuple[ReminderDraft, ...] | _UnsetType = UNSET
+
+
+@dataclass(frozen=True, slots=True)
+class AddEventReminders:
+    chat_id: int
+    event_id: UUID
+    expected_version: int
+    reminders: tuple[ReminderDraft, ...]

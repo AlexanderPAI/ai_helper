@@ -10,6 +10,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from calendar_app import (
+    AddEventReminders,
     CalendarConflictError,
     CalendarEventStatus,
     CalendarNotFoundError,
@@ -267,6 +268,94 @@ class CalendarServicePostgreSQLTest(unittest.IsolatedAsyncioTestCase):
                 (CalendarReminderStatus.PENDING, "New custom text"),
             },
         )
+
+    async def test_add_reminder_preserves_existing_reminders(self) -> None:
+        event = await self.service.create_event(
+            CreateEvent(
+                chat_id=self.chat_id,
+                title="Vet visit",
+                starts_at=local_datetime(2026, 8, 18, 12, 0),
+                timezone="Europe/Moscow",
+                reminders=(ReminderDraft(timedelta(days=1), "Prepare documents"),),
+            )
+        )
+
+        updated = await self.service.add_event_reminders(
+            AddEventReminders(
+                chat_id=self.chat_id,
+                event_id=event.id,
+                expected_version=event.version,
+                reminders=(ReminderDraft(timedelta(hours=1), "Take Fix to doctor"),),
+            )
+        )
+
+        self.assertEqual(updated.version, 2)
+        self.assertEqual(
+            {
+                (reminder.remind_at, reminder.message_text)
+                for reminder in updated.reminders
+            },
+            {
+                (event.starts_at - timedelta(days=1), "Prepare documents"),
+                (event.starts_at - timedelta(hours=1), "Take Fix to doctor"),
+            },
+        )
+
+    async def test_cursor_pagination_is_stable_for_events_at_the_same_time(
+        self,
+    ) -> None:
+        starts_at = local_datetime(2026, 8, 10, 15, 0)
+        created = [
+            await self.service.create_event(
+                CreateEvent(
+                    chat_id=self.chat_id,
+                    title=f"Meeting {number}",
+                    starts_at=starts_at,
+                    timezone="Europe/Moscow",
+                )
+            )
+            for number in range(3)
+        ]
+
+        first = await self.service.list_event_page(self.chat_id, limit=2)
+        second = await self.service.list_event_page(
+            self.chat_id,
+            after=first.next_cursor,
+            limit=2,
+        )
+
+        expected_ids = sorted(item.id for item in created)
+        actual_ids = [item.id for item in (*first.events, *second.events)]
+        self.assertEqual(actual_ids, expected_ids)
+        self.assertEqual(len(set(actual_ids)), 3)
+        self.assertIsNotNone(first.next_cursor)
+        self.assertIsNone(second.next_cursor)
+
+    async def test_search_matches_keywords_in_title_and_description(self) -> None:
+        matching = await self.service.create_event(
+            CreateEvent(
+                chat_id=self.chat_id,
+                title="Поездка к врачу",
+                description="Ветеринарная клиника для кота Барсика",
+                starts_at=local_datetime(2026, 8, 12, 15, 0),
+                timezone="Europe/Moscow",
+            )
+        )
+        await self.service.create_event(
+            CreateEvent(
+                chat_id=self.chat_id,
+                title="Поездка в магазин",
+                starts_at=local_datetime(2026, 8, 13, 15, 0),
+                timezone="Europe/Moscow",
+            )
+        )
+
+        page = await self.service.list_event_page(
+            self.chat_id,
+            search_terms=("ветеринар", "Барсик"),
+        )
+
+        self.assertEqual([event.id for event in page.events], [matching.id])
 
     async def test_failed_creation_does_not_create_chat_settings(self) -> None:
         with self.assertRaises(CalendarValidationError):

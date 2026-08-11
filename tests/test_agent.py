@@ -31,6 +31,44 @@ class AgentInterfaceIndependenceTest(unittest.TestCase):
 
         self.assertEqual(message["content"], response)
 
+    def test_structured_data_is_not_embedded_in_visible_history(self) -> None:
+        output = StructuredToolResult(
+            "calendar_events_listed",
+            "Красивый список без технических полей",
+            {"event_id": "secret-id", "version": 3},
+        )
+
+        history = Agent._history_text(output)
+
+        self.assertEqual(history, "Красивый список без технических полей")
+        self.assertNotIn("secret-id", history)
+
+    def test_structured_data_is_injected_as_separate_system_state(self) -> None:
+        agent = Agent(Mock())
+
+        messages = agent._messages_for_provider(
+            {
+                "messages": [{"role": "user", "content": "Да, это оно"}],
+                "output": "",
+                "internal_tool_data": {"event_id": "secret-id", "version": 3},
+            }
+        )
+
+        self.assertEqual(messages[-2]["role"], "system")
+        self.assertIn("secret-id", messages[-2]["content"])
+        self.assertEqual(messages[-1]["content"], "Да, это оно")
+
+    def test_legacy_internal_data_is_removed_from_model_output(self) -> None:
+        content = (
+            "Напоминание добавлено\n"
+            '<internal_tool_data>{"event_id":"secret"}</internal_tool_data>'
+        )
+
+        sanitized = Agent._sanitize_model_output(content)
+
+        self.assertEqual(sanitized, "Напоминание добавлено")
+        self.assertNotIn("secret", sanitized)
+
 
 class AgentRuntimeContextTest(unittest.IsolatedAsyncioTestCase):
     async def test_context_reaches_tool_but_ids_are_not_added_to_arguments(

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from agent import AgentRuntimeContext, StructuredToolResult
 from agent.calendar_tools import (
+    AddCalendarRemindersTool,
     CancelCalendarEventTool,
     CreateCalendarEventTool,
     GetCalendarEventTool,
@@ -17,6 +18,8 @@ from agent.calendar_tools import (
 )
 from calendar_app import (
     CalendarEvent,
+    CalendarEventCursor,
+    CalendarEventPage,
     CalendarEventStatus,
     CalendarReminder,
     CalendarReminderStatus,
@@ -83,6 +86,7 @@ class CalendarToolSchemaTest(unittest.TestCase):
             {tool.name for tool in tools},
             {
                 "create_calendar_event",
+                "add_calendar_reminders",
                 "list_calendar_events",
                 "get_calendar_event",
                 "update_calendar_event",
@@ -131,8 +135,8 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.kind, "calendar_event_created")
         self.assertEqual(result.data["event"]["chat_id"], -100123)
         self.assertIn("Взять договор и позвонить Анне", result.markdown)
-        self.assertIn(str(saved.id), result.markdown)
-        self.assertIn("Версия: `1`", result.markdown)
+        self.assertNotIn(str(saved.id), result.markdown)
+        self.assertNotIn("версия", result.markdown.casefold())
 
     async def test_list_is_chronological_and_hides_internal_fields_from_user(
         self,
@@ -144,13 +148,25 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
             title="Завтрак",
             starts_at=datetime(2026, 8, 8, 10, 0, tzinfo=UTC),
         )
-        service.list_events = AsyncMock(return_value=[later, sooner])
+        service.list_event_page = AsyncMock(
+            return_value=CalendarEventPage(
+                events=(later, sooner),
+                next_cursor=CalendarEventCursor(later.starts_at, later.id),
+            )
+        )
         tool = ListCalendarEventsTool(service)
 
-        result = await tool.ainvoke({}, context=runtime_context())
+        result = await tool.ainvoke(
+            {"keywords": ["договор"]}, context=runtime_context()
+        )
 
-        self.assertEqual(service.list_events.await_args.args[0], -100123)
-        self.assertEqual(service.list_events.await_args.kwargs["starts_from"], NOW)
+        self.assertEqual(service.list_event_page.await_args.args[0], -100123)
+        self.assertEqual(service.list_event_page.await_args.kwargs["starts_from"], NOW)
+        self.assertEqual(service.list_event_page.await_args.kwargs["limit"], 10)
+        self.assertEqual(
+            service.list_event_page.await_args.kwargs["search_terms"],
+            ("договор",),
+        )
         self.assertEqual(result.kind, "calendar_events_listed")
         self.assertEqual(result.data["events"][0]["id"], str(sooner.id))
         self.assertLess(
@@ -161,6 +177,25 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("🔔 **Напоминания:**", result.markdown)
         self.assertNotIn("ID:", result.markdown)
         self.assertNotIn("версия", result.markdown.casefold())
+        self.assertTrue(result.data["has_more"])
+        self.assertIsInstance(result.data["next_cursor"], str)
+        self.assertIn("покажи следующие", result.markdown)
+        self.assertIn("Какое именно вы имели в виду?", result.markdown)
+        self.assertTrue(result.data["selection_required"])
+
+        service.list_event_page.reset_mock()
+        service.list_event_page.return_value = CalendarEventPage((later,), None)
+        next_result = await tool.ainvoke(
+            {"cursor": result.data["next_cursor"]}, context=runtime_context()
+        )
+
+        next_call = service.list_event_page.await_args.kwargs
+        self.assertEqual(next_call["after"].starts_at, later.starts_at)
+        self.assertEqual(next_call["after"].event_id, later.id)
+        self.assertEqual(next_call["starts_from"], NOW)
+        self.assertEqual(next_call["search_terms"], ("договор",))
+        self.assertFalse(next_result.data["has_more"])
+        self.assertIsNone(next_result.data["next_cursor"])
 
     async def test_get_update_and_cancel_are_scoped_to_runtime_chat(self) -> None:
         service = Mock()
@@ -197,3 +232,38 @@ class CalendarToolExecutionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_result.kind, "calendar_event_retrieved")
         self.assertEqual(update_result.kind, "calendar_event_updated")
         self.assertEqual(cancel_result.kind, "calendar_event_cancelled")
+        for result in (get_result, update_result, cancel_result):
+            self.assertNotIn(str(current.id), result.markdown)
+            self.assertNotIn("версия", result.markdown.casefold())
+
+    async def test_add_reminder_uses_dedicated_service_operation(self) -> None:
+        service = Mock()
+        current = event(version=4)
+        service.add_event_reminders = AsyncMock(return_value=current)
+
+        result = await AddCalendarRemindersTool(service).ainvoke(
+            {
+                "event_id": str(current.id),
+                "expected_version": 3,
+                "reminders": [
+                    {
+                        "offset_minutes": 60,
+                        "message_text": "Отвести Фикса к окулисту",
+                    }
+                ],
+            },
+            context=runtime_context(chat_id=-777),
+        )
+
+        request = service.add_event_reminders.await_args.args[0]
+        self.assertEqual(request.chat_id, -777)
+        self.assertEqual(request.event_id, current.id)
+        self.assertEqual(request.expected_version, 3)
+        self.assertEqual(request.reminders[0].offset, timedelta(hours=1))
+        self.assertEqual(
+            request.reminders[0].message_text,
+            "Отвести Фикса к окулисту",
+        )
+        self.assertEqual(result.kind, "calendar_event_reminders_added")
+        self.assertIn("Напоминание добавлено", result.markdown)
+        self.assertNotIn(str(current.id), result.markdown)

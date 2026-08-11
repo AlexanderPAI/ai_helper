@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 from collections.abc import Awaitable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, TypeVar
@@ -11,9 +14,11 @@ from zoneinfo import ZoneInfo
 
 from calendar_app import (
     UNSET,
+    AddEventReminders,
     CalendarConflictError,
     CalendarError,
     CalendarEvent,
+    CalendarEventCursor,
     CalendarNotFoundError,
     CalendarReminderStatus,
     CalendarService,
@@ -158,8 +163,15 @@ class ListCalendarEventsTool(_CalendarTool):
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 100,
+                    "maximum": 20,
                     "description": self._parameter("limit"),
+                },
+                "cursor": _string(self._parameter("cursor")),
+                "keywords": {
+                    "type": "array",
+                    "maxItems": 5,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "description": self._parameter("keywords"),
                 },
             },
         )
@@ -180,20 +192,46 @@ class ListCalendarEventsTool(_CalendarTool):
     ) -> StructuredToolResult:
         runtime = self._context(context)
         zone = ZoneInfo(runtime.timezone)
-        starts_from = _optional_boundary(arguments, "starts_from_local", zone)
-        starts_until = _optional_boundary(arguments, "starts_until_local", zone)
-        if starts_from is None:
-            starts_from = runtime.current_time.astimezone(UTC)
-        limit = _optional_int(arguments, "limit", default=20)
+        cursor_token = _optional_string(arguments, "cursor")
+        if cursor_token is None:
+            starts_from = _optional_boundary(arguments, "starts_from_local", zone)
+            starts_until = _optional_boundary(arguments, "starts_until_local", zone)
+            search_terms = _optional_string_list(arguments, "keywords", maximum=5)
+            after = None
+            if starts_from is None:
+                starts_from = runtime.current_time.astimezone(UTC)
+        else:
+            starts_from, starts_until, search_terms, after = _decode_list_cursor(
+                cursor_token
+            )
+        limit = _optional_int(arguments, "limit", default=10)
+        if not 1 <= limit <= 20:
+            raise AgentToolError("limit must be between 1 and 20")
         return await self._execute(
             "listed",
-            self.service.list_events(
+            self.service.list_event_page(
                 runtime.chat_id,
                 starts_from=starts_from,
                 starts_until=starts_until,
+                search_terms=search_terms,
+                after=after,
                 limit=limit,
             ),
-            lambda events: _list_result(events, runtime.timezone),
+            lambda page: _list_result(
+                page.events,
+                runtime.timezone,
+                selection_mode=bool(search_terms),
+                next_cursor=(
+                    _encode_list_cursor(
+                        page.next_cursor,
+                        starts_from,
+                        starts_until,
+                        search_terms,
+                    )
+                    if page.next_cursor is not None
+                    else None
+                ),
+            ),
         )
 
 
@@ -230,6 +268,54 @@ class GetCalendarEventTool(_CalendarTool):
                 runtime.chat_id, _required_uuid(arguments, "event_id")
             ),
             lambda event: _event_result("retrieved", event),
+        )
+
+
+class AddCalendarRemindersTool(_CalendarTool):
+    name = "add_calendar_reminders"
+
+    @property
+    def schema(self) -> Mapping[str, Any]:
+        return _function_schema(
+            self.name,
+            self.description,
+            {
+                "event_id": _string(self._parameter("event_id")),
+                "expected_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": self._parameter("expected_version"),
+                },
+                "reminders": _reminders_schema(self._parameter("reminders")),
+            },
+            required=("event_id", "expected_version", "reminders"),
+        )
+
+    def invoke(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> StructuredToolResult:
+        return self._sync(self.ainvoke(arguments, context=context))
+
+    async def ainvoke(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        context: AgentRuntimeContext | None = None,
+    ) -> StructuredToolResult:
+        runtime = self._context(context)
+        request = AddEventReminders(
+            chat_id=runtime.chat_id,
+            event_id=_required_uuid(arguments, "event_id"),
+            expected_version=_required_int(arguments, "expected_version"),
+            reminders=_reminders(arguments),
+        )
+        return await self._execute(
+            "reminders_added",
+            self.service.add_event_reminders(request),
+            lambda event: _event_result("reminders_added", event),
         )
 
 
@@ -366,6 +452,7 @@ def calendar_tools(service: CalendarService) -> tuple[_CalendarTool, ...]:
         CreateCalendarEventTool(service),
         ListCalendarEventsTool(service),
         GetCalendarEventTool(service),
+        AddCalendarRemindersTool(service),
         UpdateCalendarEventTool(service),
         CancelCalendarEventTool(service),
     )
@@ -442,6 +529,15 @@ def _optional_string(arguments: Mapping[str, Any], name: str) -> str | None:
     if name not in arguments or arguments[name] is None:
         return None
     return _required_string(arguments, name)
+
+
+def _optional_string_list(
+    arguments: Mapping[str, Any], name: str, *, maximum: int
+) -> tuple[str, ...]:
+    value = arguments.get(name, [])
+    if not isinstance(value, list) or len(value) > maximum:
+        raise AgentToolError(f"{name} must be an array with at most {maximum} items")
+    return tuple(_required_string({name: item}, name) for item in value)
 
 
 def _nullable_string(arguments: Mapping[str, Any], name: str) -> str | None:
@@ -521,6 +617,7 @@ def _event_result(operation: str, event: CalendarEvent) -> StructuredToolResult:
     labels = {
         "created": "✅ Событие сохранено",
         "retrieved": "📅 Событие",
+        "reminders_added": "✅ Напоминание добавлено",
         "updated": "✅ Событие обновлено",
         "cancelled": "✅ Событие отменено",
     }
@@ -532,13 +629,20 @@ def _event_result(operation: str, event: CalendarEvent) -> StructuredToolResult:
 
 
 def _list_result(
-    events: Sequence[CalendarEvent], timezone: str
+    events: Sequence[CalendarEvent],
+    timezone: str,
+    *,
+    selection_mode: bool = False,
+    next_cursor: str | None = None,
 ) -> StructuredToolResult:
     ordered_events = sorted(events, key=lambda event: event.starts_at)
     if not ordered_events:
         markdown = "В календаре этого чата нет событий за выбранный период."
     else:
-        lines = ["## 📅 Ближайшие события", ""]
+        heading = (
+            "## 🔎 Подходящие события" if selection_mode else "## 📅 Ближайшие события"
+        )
+        lines = [heading, ""]
         for position, event in enumerate(ordered_events, start=1):
             local = event.starts_at.astimezone(ZoneInfo(timezone))
             lines.extend((f"### {position}. {_escape(event.title)}", ""))
@@ -572,6 +676,21 @@ def _list_result(
 
             if position < len(ordered_events):
                 lines.extend(("", "---", ""))
+        if next_cursor is not None:
+            lines.extend(
+                (
+                    "",
+                    "_Есть ещё события. Скажите «покажи следующие»._",
+                )
+            )
+        if selection_mode:
+            lines.append("")
+            if len(ordered_events) == 1:
+                lines.append("**Это событие вы имели в виду?**")
+            else:
+                lines.append(
+                    "**Подходит несколько событий. Какое именно вы имели в виду?**"
+                )
         markdown = "\n".join(lines)
     return StructuredToolResult(
         kind="calendar_events_listed",
@@ -580,8 +699,71 @@ def _list_result(
             "operation": "listed",
             "timezone": timezone,
             "events": [_event_data(event) for event in ordered_events],
+            "has_more": next_cursor is not None,
+            "next_cursor": next_cursor,
+            "selection_required": selection_mode,
         },
     )
+
+
+def _encode_list_cursor(
+    cursor: CalendarEventCursor,
+    starts_from: datetime | None,
+    starts_until: datetime | None,
+    search_terms: Sequence[str],
+) -> str:
+    payload = json.dumps(
+        {
+            "after": cursor.starts_at.isoformat(),
+            "event_id": str(cursor.event_id),
+            "from": starts_from.isoformat() if starts_from is not None else None,
+            "until": starts_until.isoformat() if starts_until is not None else None,
+            "keywords": list(search_terms),
+        },
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def _decode_list_cursor(
+    token: str,
+) -> tuple[datetime | None, datetime | None, tuple[str, ...], CalendarEventCursor]:
+    try:
+        padding = "=" * (-len(token) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(token + padding))
+        starts_at = datetime.fromisoformat(payload["after"])
+        starts_from = (
+            datetime.fromisoformat(payload["from"])
+            if payload["from"] is not None
+            else None
+        )
+        starts_until = (
+            datetime.fromisoformat(payload["until"])
+            if payload["until"] is not None
+            else None
+        )
+        cursor = CalendarEventCursor(starts_at, UUID(payload["event_id"]))
+        keywords = payload["keywords"]
+        if not isinstance(keywords, list) or not all(
+            isinstance(item, str) and item for item in keywords
+        ):
+            raise ValueError
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as error:
+        raise AgentToolError("cursor is invalid or expired") from error
+    if (
+        starts_at.tzinfo is None
+        or (starts_from is not None and starts_from.tzinfo is None)
+        or (starts_until is not None and starts_until.tzinfo is None)
+    ):
+        raise AgentToolError("cursor is invalid or expired")
+    return starts_from, starts_until, tuple(keywords), cursor
 
 
 def _event_markdown(heading: str, event: CalendarEvent) -> str:
@@ -590,13 +772,13 @@ def _event_markdown(heading: str, event: CalendarEvent) -> str:
     lines = [
         f"## {heading}",
         "",
-        f"**{_escape(event.title)}**",
-        f"Дата: {local:%d.%m.%Y %H:%M} ({_escape(event.source_timezone)})",
-        f"ID: `{event.id}`",
-        f"Версия: `{event.version}`",
+        f"### {_escape(event.title)}",
+        "",
+        f"🗓 **Когда:** {local:%d.%m.%Y в %H:%M}",
+        f"🌍 **Часовой пояс:** {_escape(event.source_timezone)}",
     ]
     if event.description:
-        lines.append(f"Описание: {_escape(event.description)}")
+        lines.append(f"📝 **Описание:** {_escape(event.description)}")
     open_reminders = [
         reminder
         for reminder in event.reminders
@@ -604,14 +786,15 @@ def _event_markdown(heading: str, event: CalendarEvent) -> str:
         in (CalendarReminderStatus.PENDING, CalendarReminderStatus.PROCESSING)
     ]
     if open_reminders:
-        lines.extend(("", "Напоминания:"))
+        lines.extend(("", "🔔 **Напоминания:**"))
         for reminder in open_reminders:
             reminder_local = reminder.remind_at.astimezone(zone)
             lines.append(
-                f"- {reminder_local:%d.%m.%Y %H:%M}: «{_escape(reminder.message_text)}»"
+                f"- {reminder_local:%d.%m.%Y в %H:%M} — "
+                f"{_escape(reminder.message_text)}"
             )
     else:
-        lines.extend(("", "Напоминаний нет."))
+        lines.extend(("", "🔕 Напоминания не установлены"))
     return "\n".join(lines)
 
 
@@ -644,6 +827,7 @@ def _escape(value: str) -> str:
 
 
 __all__ = [
+    "AddCalendarRemindersTool",
     "CancelCalendarEventTool",
     "CreateCalendarEventTool",
     "GetCalendarEventTool",

@@ -62,10 +62,11 @@ class CalendarEvent(TimestampMixin, Base):
         CheckConstraint("version >= 1", name="ck_calendar_events_version"),
         Index("ix_calendar_events_chat_starts_at", "chat_id", "starts_at"),
         Index(
-            "ix_calendar_events_chat_status_starts_at",
+            "ix_calendar_events_chat_status_starts_at_id",
             "chat_id",
             "status",
             "starts_at",
+            "id",
         ),
     )
 

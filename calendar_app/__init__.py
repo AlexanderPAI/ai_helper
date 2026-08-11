@@ -2,7 +2,10 @@
 
 from .domain import (
     UNSET,
+    AddEventReminders,
     CalendarEvent,
+    CalendarEventCursor,
+    CalendarEventPage,
     CalendarEventStatus,
     CalendarReminder,
     CalendarReminderStatus,
@@ -26,9 +29,12 @@ from .service import CalendarService, CalendarServiceOptions
 
 __all__ = [
     "UNSET",
+    "AddEventReminders",
     "CalendarConflictError",
     "CalendarError",
     "CalendarEvent",
+    "CalendarEventCursor",
+    "CalendarEventPage",
     "CalendarEventStatus",
     "CalendarNotFoundError",
     "CalendarReminder",

@@ -8,7 +8,12 @@ from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
-from .domain import CalendarEvent, CalendarEventStatus, CalendarSettings
+from .domain import (
+    CalendarEvent,
+    CalendarEventCursor,
+    CalendarEventStatus,
+    CalendarSettings,
+)
 
 ReminderRow = tuple[UUID, datetime, str]
 
@@ -49,6 +54,8 @@ class CalendarRepository(Protocol):
         starts_from: datetime | None = None,
         starts_until: datetime | None = None,
         statuses: Sequence[CalendarEventStatus] = (CalendarEventStatus.ACTIVE,),
+        search_terms: Sequence[str] = (),
+        after: CalendarEventCursor | None = None,
         limit: int = 50,
     ) -> list[CalendarEvent]: ...
 

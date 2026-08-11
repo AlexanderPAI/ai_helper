@@ -228,6 +228,7 @@ async def run_bot() -> None:
             reminder_task = asyncio.create_task(
                 reminder_worker.run(), name="reminder-worker"
             )
+            polling_task: asyncio.Task[None] | None = None
             try:
                 application = TelegramAgentBot(
                     agent=Agent(
@@ -251,9 +252,24 @@ async def run_bot() -> None:
                     bot_user.username,
                     len(settings.chat_ids),
                 )
-                await dispatcher.start_polling(telegram_bot)
+                polling_task = asyncio.create_task(
+                    dispatcher.start_polling(telegram_bot),
+                    name="telegram-polling",
+                )
+                done, _ = await asyncio.wait(
+                    (polling_task, reminder_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if reminder_task in done:
+                    await reminder_task
+                    raise RuntimeError("reminder worker stopped unexpectedly")
+                await polling_task
             finally:
                 reminder_worker.request_stop()
+                if polling_task is not None and not polling_task.done():
+                    polling_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await polling_task
                 try:
                     await asyncio.wait_for(
                         reminder_task,

@@ -10,7 +10,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .domain import (
     UNSET,
+    AddEventReminders,
     CalendarEvent,
+    CalendarEventCursor,
+    CalendarEventPage,
     CalendarEventStatus,
     CalendarReminderStatus,
     CalendarSettings,
@@ -108,8 +111,30 @@ class CalendarService:
         starts_from: datetime | None = None,
         starts_until: datetime | None = None,
         statuses: Sequence[CalendarEventStatus] = (CalendarEventStatus.ACTIVE,),
+        search_terms: Sequence[str] = (),
         limit: int = 50,
     ) -> list[CalendarEvent]:
+        page = await self.list_event_page(
+            chat_id,
+            starts_from=starts_from,
+            starts_until=starts_until,
+            statuses=statuses,
+            search_terms=search_terms,
+            limit=limit,
+        )
+        return list(page.events)
+
+    async def list_event_page(
+        self,
+        chat_id: int,
+        *,
+        starts_from: datetime | None = None,
+        starts_until: datetime | None = None,
+        statuses: Sequence[CalendarEventStatus] = (CalendarEventStatus.ACTIVE,),
+        search_terms: Sequence[str] = (),
+        after: CalendarEventCursor | None = None,
+        limit: int = 10,
+    ) -> CalendarEventPage:
         self._validate_chat_id(chat_id)
         if not 1 <= limit <= self.options.max_list_limit:
             raise CalendarValidationError(
@@ -117,8 +142,15 @@ class CalendarService:
             )
         if not statuses:
             raise CalendarValidationError("at least one event status is required")
+        normalized_terms = self._search_terms(search_terms)
         normalized_from = self._require_aware_utc(starts_from, "starts_from")
         normalized_until = self._require_aware_utc(starts_until, "starts_until")
+        normalized_after = None
+        if after is not None:
+            normalized_after = CalendarEventCursor(
+                starts_at=self._require_aware_utc(after.starts_at, "after.starts_at"),
+                event_id=after.event_id,
+            )
         if (
             normalized_from is not None
             and normalized_until is not None
@@ -127,13 +159,38 @@ class CalendarService:
             raise CalendarValidationError("starts_from must be before starts_until")
 
         async with self.unit_of_work_factory() as unit_of_work:
-            return await unit_of_work.repository.list_events(
+            events = await unit_of_work.repository.list_events(
                 chat_id,
                 starts_from=normalized_from,
                 starts_until=normalized_until,
                 statuses=statuses,
-                limit=limit,
+                search_terms=normalized_terms,
+                after=normalized_after,
+                limit=limit + 1,
             )
+        has_more = len(events) > limit
+        visible = events[:limit]
+        next_cursor = None
+        if has_more:
+            last = visible[-1]
+            next_cursor = CalendarEventCursor(last.starts_at, last.id)
+        return CalendarEventPage(tuple(visible), next_cursor)
+
+    @staticmethod
+    def _search_terms(values: Sequence[str]) -> tuple[str, ...]:
+        if len(values) > 5:
+            raise CalendarValidationError("no more than 5 search terms are allowed")
+        terms = []
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise CalendarValidationError("search terms must be non-empty strings")
+            term = value.strip()
+            if len(term) > 64:
+                raise CalendarValidationError(
+                    "search terms must not exceed 64 characters"
+                )
+            terms.append(term)
+        return tuple(terms)
 
     async def update_event(self, request: UpdateEvent) -> CalendarEvent:
         self._validate_chat_id(request.chat_id)
@@ -200,6 +257,54 @@ class CalendarService:
                 await repository.cancel_open_reminders(request.event_id)
                 await repository.add_reminders(request.event_id, reminder_rows)
 
+            updated = await repository.get_event(request.chat_id, request.event_id)
+            if updated is None:  # pragma: no cover - protected by transaction
+                raise CalendarNotFoundError("event not found in this chat")
+            return updated
+
+    async def add_event_reminders(self, request: AddEventReminders) -> CalendarEvent:
+        self._validate_chat_id(request.chat_id)
+        if request.expected_version < 1:
+            raise CalendarValidationError("expected_version must be positive")
+        if not request.reminders:
+            raise CalendarValidationError("at least one reminder is required")
+        now = self._utc_now()
+
+        async with self.unit_of_work_factory() as unit_of_work:
+            repository = unit_of_work.repository
+            current = await repository.get_event(request.chat_id, request.event_id)
+            if current is None:
+                raise CalendarNotFoundError("event not found in this chat")
+            if current.status is not CalendarEventStatus.ACTIVE:
+                raise CalendarValidationError(
+                    "reminders can only be added to active events"
+                )
+            open_count = sum(
+                reminder.status
+                in (
+                    CalendarReminderStatus.PENDING,
+                    CalendarReminderStatus.PROCESSING,
+                )
+                for reminder in current.reminders
+            )
+            if (
+                open_count + len(request.reminders)
+                > self.options.max_reminders_per_event
+            ):
+                raise CalendarValidationError(
+                    f"an event can have at most {self.options.max_reminders_per_event} "
+                    "open reminders"
+                )
+            reminder_rows = self._reminder_rows(
+                current.starts_at, request.reminders, now
+            )
+            await repository.update_event(
+                request.chat_id,
+                request.event_id,
+                request.expected_version,
+                {},
+            )
+            await repository.add_reminders(request.event_id, reminder_rows)
             updated = await repository.get_event(request.chat_id, request.event_id)
             if updated is None:  # pragma: no cover - protected by transaction
                 raise CalendarNotFoundError("event not found in this chat")

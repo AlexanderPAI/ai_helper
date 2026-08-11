@@ -3,6 +3,7 @@
 from typing import Any
 
 from .calendar_tools import (
+    AddCalendarRemindersTool,
     CancelCalendarEventTool,
     CreateCalendarEventTool,
     GetCalendarEventTool,
@@ -23,6 +24,7 @@ from .settings import HumorAPISettings, OpenRouterSettings
 from .tools import AgentTool, AgentToolError, SendMemeTool
 
 __all__ = [
+    "AddCalendarRemindersTool",
     "Agent",
     "AgentRuntimeContext",
     "AgentTool",

@@ -8,7 +8,7 @@ from types import TracebackType
 from typing import Self
 from uuid import UUID
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 
 from calendar_app.domain import (
     CalendarEvent,
+    CalendarEventCursor,
     CalendarEventStatus,
     CalendarReminder,
     CalendarReminderStatus,
@@ -121,6 +122,8 @@ class SqlAlchemyCalendarRepository:
         starts_from: datetime | None = None,
         starts_until: datetime | None = None,
         statuses: Sequence[CalendarEventStatus] = (CalendarEventStatus.ACTIVE,),
+        search_terms: Sequence[str] = (),
+        after: CalendarEventCursor | None = None,
         limit: int = 50,
     ) -> list[CalendarEvent]:
         statement = self._event_query().where(
@@ -131,9 +134,33 @@ class SqlAlchemyCalendarRepository:
             statement = statement.where(CalendarEventRecord.starts_at >= starts_from)
         if starts_until is not None:
             statement = statement.where(CalendarEventRecord.starts_at < starts_until)
-        statement = statement.order_by(CalendarEventRecord.starts_at).limit(limit)
+        for term in search_terms:
+            pattern = f"%{self._escape_like(term)}%"
+            statement = statement.where(
+                or_(
+                    CalendarEventRecord.title.ilike(pattern, escape="\\"),
+                    CalendarEventRecord.description.ilike(pattern, escape="\\"),
+                )
+            )
+        if after is not None:
+            statement = statement.where(
+                or_(
+                    CalendarEventRecord.starts_at > after.starts_at,
+                    and_(
+                        CalendarEventRecord.starts_at == after.starts_at,
+                        CalendarEventRecord.id > after.event_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            CalendarEventRecord.starts_at, CalendarEventRecord.id
+        ).limit(limit)
         records = (await self.session.execute(statement)).scalars().all()
         return [self._event(record) for record in records]
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     async def update_event(
         self,

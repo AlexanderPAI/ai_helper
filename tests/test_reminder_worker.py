@@ -269,6 +269,41 @@ class ReminderWorkerPostgreSQLTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(record.sent_at)
         self.assertIsNone(record.locked_by)
 
+    async def test_live_worker_delivers_reminder_when_it_becomes_due(self) -> None:
+        realtime_service = CalendarService(
+            SqlAlchemyCalendarUnitOfWorkFactory(self.sessions)
+        )
+        starts_at = datetime.now(UTC) + timedelta(seconds=2)
+        event = await realtime_service.create_event(
+            CreateEvent(
+                chat_id=self.chat_id,
+                title="Событие по живому таймеру",
+                starts_at=starts_at.replace(tzinfo=None),
+                timezone="UTC",
+                reminders=(ReminderDraft(timedelta(seconds=1), "Пора"),),
+            )
+        )
+        reminder_id = event.reminders[0].id
+        sender = _Sender(599)
+        worker = ReminderWorker(
+            self.reminder_uow,
+            sender,
+            worker_id="live-worker",
+            options=ReminderWorkerOptions(poll_interval=0.05),
+        )
+        task = asyncio.create_task(worker.run())
+        try:
+            async with asyncio.timeout(4):
+                while not sender.deliveries:
+                    await asyncio.sleep(0.05)
+        finally:
+            worker.request_stop()
+            await task
+
+        record = await self.reminder_record(reminder_id)
+        self.assertEqual(record.status, "sent")
+        self.assertEqual(record.telegram_message_id, 599)
+
     async def test_restart_recovers_expired_lease_and_delivers(self) -> None:
         reminder_id = await self.create_due_reminder()
         async with self.reminder_uow() as unit_of_work:

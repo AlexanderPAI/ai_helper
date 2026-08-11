@@ -63,7 +63,7 @@ class MigratedPostgreSQLSchemaTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIn(
-            "ix_calendar_events_chat_status_starts_at", schema["event_indexes"]
+            "ix_calendar_events_chat_status_starts_at_id", schema["event_indexes"]
         )
         self.assertIn(
             "ix_event_reminders_status_next_attempt_at",
