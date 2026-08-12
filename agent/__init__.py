@@ -13,6 +13,7 @@ from .calendar_tools import (
 )
 from .context import AgentRuntimeContext
 from .place_tools import SearchPlacesTool
+from .progress import AgentProgressCallback, AgentProgressEvent
 from .providers import (
     LLMProvider,
     LLMProviderError,
@@ -32,6 +33,8 @@ from .tools import AgentTool, AgentToolError, SendMemeTool
 __all__ = [
     "AddCalendarRemindersTool",
     "Agent",
+    "AgentProgressCallback",
+    "AgentProgressEvent",
     "AgentRuntimeContext",
     "AgentTool",
     "AgentToolError",
