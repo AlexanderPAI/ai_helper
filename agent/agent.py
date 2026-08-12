@@ -292,7 +292,7 @@ class Agent:
                 content = self._sanitize_model_output(response.content)
                 output = (
                     last_output
-                    if content == _TOOL_FLOW_DONE or not content
+                    if self._is_tool_flow_done(response.content) or not content
                     else content
                 )
                 logger.info(
@@ -376,7 +376,7 @@ class Agent:
                 content = self._sanitize_model_output(response.content)
                 output = (
                     last_output
-                    if content == _TOOL_FLOW_DONE or not content
+                    if self._is_tool_flow_done(response.content) or not content
                     else content
                 )
                 logger.info(
@@ -586,12 +586,24 @@ class Agent:
 
     @staticmethod
     def _sanitize_model_output(content: str) -> str:
-        return re.sub(
+        sanitized = re.sub(
             r"<internal_tool_data>.*?</internal_tool_data>",
             "",
             content,
             flags=re.DOTALL | re.IGNORECASE,
-        ).strip()
+        )
+        sanitized = re.sub(
+            r"(?i)(?:\\?[*_])*TOOL(?:\\?[*_\s])*FLOW"
+            r"(?:\\?[*_\s])*DONE(?:\\?[*_])*",
+            "",
+            sanitized,
+        )
+        return sanitized.strip()
+
+    @staticmethod
+    def _is_tool_flow_done(content: str) -> bool:
+        normalized = re.sub(r"[^A-Z]", "", content.upper())
+        return "TOOLFLOWDONE" in normalized
 
     @classmethod
     def _visible_model_output(cls, content: str) -> str:

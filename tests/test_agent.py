@@ -70,6 +70,18 @@ class AgentInterfaceIndependenceTest(unittest.TestCase):
         self.assertEqual(sanitized, "Напоминание добавлено")
         self.assertNotIn("secret", sanitized)
 
+    def test_tool_flow_marker_is_removed_from_visible_model_output(self) -> None:
+        content = "Поиск завершён.\n\n**TOOL\\_FLOW\\_DONE**"
+
+        sanitized = Agent._sanitize_model_output(content)
+
+        self.assertEqual(sanitized, "Поиск завершён.")
+
+    def test_markdown_tool_flow_marker_is_recognized(self) -> None:
+        self.assertTrue(
+            Agent._is_tool_flow_done("Понял, выполняю поиск.\n\n**TOOL\\_FLOW\\_DONE**")
+        )
+
 
 class AgentRuntimeContextTest(unittest.IsolatedAsyncioTestCase):
     async def test_context_reaches_tool_but_ids_are_not_added_to_arguments(
@@ -104,6 +116,35 @@ class AgentRuntimeContextTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentToolOrchestrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_markdown_completion_marker_returns_actual_tool_result(self) -> None:
+        provider = _SequencedProvider(
+            _plan_response(("search_places", "Найти пивной бар")),
+            LLMResponse(
+                tool_calls=(
+                    ToolCall(
+                        "search_places",
+                        {
+                            "query": "пивной бар на заводе имени Казакова",
+                            "location": "Москва, метро Кутузовская",
+                        },
+                    ),
+                )
+            ),
+            LLMResponse(
+                content=(
+                    "Понял, уточняю поиск. Выполняю поиск.\n\n**TOOL\\_FLOW\\_DONE**"
+                )
+            ),
+        )
+        search_result = "Найден бар «Тест» — Москва, улица Тестовая, 1."
+        search = _RecordingTool("search_places", search_result)
+        agent = Agent(provider, tools=(search,))
+
+        result = await agent.ainvoke("Найди пивной бар на Кутузовской")
+
+        self.assertEqual(result, search_result)
+        self.assertNotIn("TOOL", result)
+
     async def test_empty_initial_response_is_retried_and_action_is_executed(
         self,
     ) -> None:
