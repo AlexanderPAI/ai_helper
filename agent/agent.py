@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from operator import add
@@ -20,7 +21,10 @@ from .providers import LLMProvider, LLMResponse
 from .results import MediaResult, StructuredToolResult, ToolResult
 from .tools import AgentTool
 
-Message = dict[str, str]
+Message = dict[str, Any]
+
+_MAX_TOOL_ROUNDS = 6
+_TOOL_FLOW_DONE = "__TOOL_FLOW_DONE__"
 
 
 class AgentState(TypedDict):
@@ -82,7 +86,11 @@ class Agent:
             self._messages_for_provider(state, context),
             **self._provider_options(),
         )
-        output = self._response_output(response, context=context)
+        output = self._complete_tool_flow(
+            response,
+            state=state,
+            context=context,
+        )
         update: AgentState = {
             "messages": [self._assistant_message(self._history_text(output))],
             "output": output,
@@ -99,7 +107,11 @@ class Agent:
             self._messages_for_provider(state, context),
             **self._provider_options(),
         )
-        output = await self._aresponse_output(response, context=context)
+        output = await self._acomplete_tool_flow(
+            response,
+            state=state,
+            context=context,
+        )
         update: AgentState = {
             "messages": [self._assistant_message(self._history_text(output))],
             "output": output,
@@ -107,6 +119,168 @@ class Agent:
         if isinstance(output, StructuredToolResult):
             update["internal_tool_data"] = output.data
         return update
+
+    def _complete_tool_flow(
+        self,
+        response: LLMResponse,
+        *,
+        state: AgentState,
+        context: AgentRuntimeContext | None,
+    ) -> ToolResult:
+        """Execute dependent tool calls until the user's request is complete."""
+        return self._run_tool_flow(
+            response,
+            state=state,
+            context=context,
+            invoke=lambda tool, arguments: tool.invoke(arguments, context=context),
+        )
+
+    def _run_tool_flow(
+        self,
+        response: LLMResponse,
+        *,
+        state: AgentState,
+        context: AgentRuntimeContext | None,
+        invoke: Any,
+    ) -> ToolResult:
+        if not isinstance(response, LLMResponse):
+            raise TypeError("provider must return an LLMResponse")
+        if not response.tool_calls:
+            return self._sanitize_model_output(response.content)
+
+        flow_messages = self._messages_for_provider(state, context)
+        last_output: ToolResult | None = None
+        previous_calls: tuple[tuple[str, str], ...] | None = None
+        for _ in range(_MAX_TOOL_ROUNDS):
+            signature = self._tool_call_signature(response)
+            if signature == previous_calls and last_output is not None:
+                return last_output
+            previous_calls = signature
+            last_output = self._invoke_tool_calls(
+                response, context=context, invoke=invoke
+            )
+            flow_messages.append(
+                {
+                    "role": "system",
+                    "content": self._tool_round_prompt(response, last_output),
+                }
+            )
+            response = self.provider.generate(
+                flow_messages,
+                **self._provider_options(),
+            )
+            if not response.tool_calls:
+                content = self._sanitize_model_output(response.content)
+                return (
+                    last_output
+                    if content == _TOOL_FLOW_DONE or not content
+                    else content
+                )
+        if last_output is None:  # pragma: no cover - guarded by the first response
+            return ""
+        return last_output
+
+    async def _acomplete_tool_flow(
+        self,
+        response: LLMResponse,
+        *,
+        state: AgentState,
+        context: AgentRuntimeContext | None,
+    ) -> ToolResult:
+        if not isinstance(response, LLMResponse):
+            raise TypeError("provider must return an LLMResponse")
+        if not response.tool_calls:
+            return self._sanitize_model_output(response.content)
+
+        flow_messages = self._messages_for_provider(state, context)
+        last_output: ToolResult | None = None
+        previous_calls: tuple[tuple[str, str], ...] | None = None
+        for _ in range(_MAX_TOOL_ROUNDS):
+            signature = self._tool_call_signature(response)
+            if signature == previous_calls and last_output is not None:
+                return last_output
+            previous_calls = signature
+            results = []
+            for tool_call in response.tool_calls:
+                try:
+                    tool = self.tools[tool_call.name]
+                except KeyError as error:
+                    raise ValueError(
+                        f"unknown tool requested: {tool_call.name}"
+                    ) from error
+                results.append(await tool.ainvoke(tool_call.arguments, context=context))
+            last_output = self._combine_tool_results(results)
+            flow_messages.append(
+                {
+                    "role": "system",
+                    "content": self._tool_round_prompt(response, last_output),
+                }
+            )
+            response = await self.provider.agenerate(
+                flow_messages,
+                **self._provider_options(),
+            )
+            if not response.tool_calls:
+                content = self._sanitize_model_output(response.content)
+                return (
+                    last_output
+                    if content == _TOOL_FLOW_DONE or not content
+                    else content
+                )
+        return last_output
+
+    def _invoke_tool_calls(
+        self,
+        response: LLMResponse,
+        *,
+        context: AgentRuntimeContext | None,
+        invoke: Any,
+    ) -> ToolResult:
+        results = []
+        for tool_call in response.tool_calls:
+            try:
+                tool = self.tools[tool_call.name]
+            except KeyError as error:
+                raise ValueError(f"unknown tool requested: {tool_call.name}") from error
+            results.append(invoke(tool, tool_call.arguments))
+        return self._combine_tool_results(results)
+
+    @staticmethod
+    def _tool_call_signature(response: LLMResponse) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (
+                call.name,
+                json.dumps(
+                    call.arguments, ensure_ascii=False, sort_keys=True, default=str
+                ),
+            )
+            for call in response.tool_calls
+        )
+
+    @staticmethod
+    def _tool_round_prompt(response: LLMResponse, output: ToolResult) -> str:
+        calls = ", ".join(call.name for call in response.tool_calls)
+        if isinstance(output, StructuredToolResult):
+            visible = output.markdown
+            data = output.data
+        elif isinstance(output, MediaResult):
+            visible = f"[Медиа отправлено, id={output.id}]"
+            data = None
+        else:
+            visible = output
+            data = None
+        payload = json.dumps(data, ensure_ascii=False, default=str) if data else "нет"
+        return (
+            "Результат выполненного шага инструментов (не показывай служебные "
+            f"данные пользователю). Вызваны: {calls}.\n"
+            f"Пользовательский результат:\n{visible}\n"
+            f"Служебные структурированные данные: {payload}\n"
+            "Сопоставь результат с исходной просьбой пользователя. Если остались "
+            "действия, вызови следующий необходимый инструмент, используя только "
+            "подтверждённые данные результата. Если просьба выполнена полностью, "
+            f"ответь ровно {_TOOL_FLOW_DONE}. Если без выбора или уточнения "
+            "продолжать нельзя, задай пользователю один конкретный вопрос."
+        )
 
     def _provider_options(self) -> dict[str, Any]:
         options = dict(self.provider_options)

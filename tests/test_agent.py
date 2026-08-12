@@ -91,18 +91,115 @@ class AgentRuntimeContextTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(tool.context, context)
         self.assertEqual(tool.arguments, {"title": "Встреча"})
         self.assertIsInstance(result, StructuredToolResult)
-        runtime_prompt = provider.messages[-2]["content"]
+        runtime_prompt = next(
+            message["content"]
+            for message in provider.messages
+            if message["role"] == "system"
+            and "Доверенные данные текущего запроса" in message["content"]
+        )
         self.assertIn("2026-08-07T12:00:00+03:00", runtime_prompt)
         self.assertIn("Europe/Moscow", runtime_prompt)
         self.assertNotIn("-100500", runtime_prompt)
 
 
+class AgentToolOrchestrationTest(unittest.IsolatedAsyncioTestCase):
+    async def test_dependent_tools_run_in_multiple_rounds(self) -> None:
+        provider = _SequencedProvider(
+            LLMResponse(
+                tool_calls=(
+                    ToolCall(
+                        "search_places",
+                        {
+                            "query": "бар для дня рождения",
+                            "location": "Москва, метро Павелецкая",
+                        },
+                    ),
+                )
+            ),
+            LLMResponse(
+                tool_calls=(
+                    ToolCall(
+                        "create_calendar_event",
+                        {
+                            "title": "Празднование дня рождения",
+                            "starts_at_local": "2026-08-18T19:00:00",
+                            "place": {
+                                "name": "Бар Тест",
+                                "address": "Москва, Тестовая улица, 1",
+                            },
+                            "reminders": [
+                                {
+                                    "offset_minutes": 1440,
+                                    "message_text": "Завтра празднование дня рождения",
+                                }
+                            ],
+                        },
+                    ),
+                )
+            ),
+            LLMResponse(content="__TOOL_FLOW_DONE__"),
+        )
+        search = _RecordingTool(
+            "search_places",
+            "1. Бар Тест — Москва, Тестовая улица, 1",
+        )
+        created = StructuredToolResult(
+            "calendar_created",
+            "Событие создано с местом и напоминанием.",
+            {"event_id": "event-1", "version": 1},
+        )
+        create = _RecordingTool("create_calendar_event", created)
+        agent = Agent(provider, tools=(search, create))
+
+        result = await agent.ainvoke(
+            "Запланируй день рождения и найди бар у метро Павелецкая"
+        )
+
+        self.assertIs(result, created)
+        self.assertEqual(len(search.calls), 1)
+        self.assertEqual(len(create.calls), 1)
+        self.assertEqual(
+            create.calls[0]["place"]["name"],
+            "Бар Тест",
+        )
+        self.assertEqual(create.calls[0]["reminders"][0]["offset_minutes"], 1440)
+        self.assertIn("Бар Тест", provider.messages_by_call[1][-1]["content"])
+
+    async def test_standalone_tool_stops_without_calling_unrequested_tools(
+        self,
+    ) -> None:
+        provider = _SequencedProvider(
+            LLMResponse(
+                tool_calls=(
+                    ToolCall(
+                        "search_places",
+                        {"query": "бары", "location": "Москва"},
+                    ),
+                )
+            ),
+            LLMResponse(content="__TOOL_FLOW_DONE__"),
+        )
+        search = _RecordingTool("search_places", "Найдено три бара")
+        create = _RecordingTool("create_calendar_event", "Создано")
+        agent = Agent(provider, tools=(search, create))
+
+        result = await agent.ainvoke("Покажи бары в Москве")
+
+        self.assertEqual(result, "Найдено три бара")
+        self.assertEqual(len(search.calls), 1)
+        self.assertEqual(create.calls, [])
+
+
 class _Provider:
     def __init__(self) -> None:
         self.messages = []
+        self.call_count = 0
 
     async def agenerate(self, messages, **options):
         self.messages = messages
+        self.call_count += 1
+        if self.call_count > 1:
+            return LLMResponse(content="__TOOL_FLOW_DONE__")
         return LLMResponse(tool_calls=(ToolCall("test_context", {"title": "Встреча"}),))
 
 
@@ -128,6 +225,43 @@ class _ContextCapturingTool:
 
     def invoke(self, arguments, *, context=None):
         raise NotImplementedError
+
+
+class _SequencedProvider:
+    def __init__(self, *responses: LLMResponse) -> None:
+        self.responses = list(responses)
+        self.messages_by_call = []
+
+    async def agenerate(self, messages, **options):
+        self.messages_by_call.append([dict(message) for message in messages])
+        return self.responses.pop(0)
+
+
+class _RecordingTool:
+    def __init__(self, name, result) -> None:
+        self.name = name
+        self.description = name
+        self.result = result
+        self.calls = []
+
+    @property
+    def schema(self):
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+    async def ainvoke(self, arguments, *, context=None):
+        self.calls.append(arguments)
+        return self.result
+
+    def invoke(self, arguments, *, context=None):
+        self.calls.append(arguments)
+        return self.result
 
 
 if __name__ == "__main__":
