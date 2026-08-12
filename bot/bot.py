@@ -127,13 +127,15 @@ class TelegramAgentBot:
 
             started_at = monotonic()
             logger.info("LLM request started chat_id=%s", message.chat.id)
-            async with self.progress.track(message) as status_message:
+            async with self.progress.track(message) as progress_session:
+                status_message = progress_session.message
                 try:
                     runtime_context = await self._runtime_context(message)
                     response = await self.agent.ainvoke(
                         prompt,
                         session_id=session_id,
                         runtime_context=runtime_context,
+                        progress_callback=progress_session.report,
                     )
                 except LLMProviderError, AgentToolError, SQLAlchemyError:
                     logger.exception(

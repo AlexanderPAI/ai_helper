@@ -204,9 +204,14 @@ class AgentToolOrchestrationTest(unittest.IsolatedAsyncioTestCase):
         )
         create = _RecordingTool("create_calendar_event", created)
         agent = Agent(provider, tools=(search, create))
+        progress_events = []
+
+        async def capture_progress(event) -> None:
+            progress_events.append(event)
 
         result = await agent.ainvoke(
-            "Запланируй день рождения и найди бар у метро Павелецкая"
+            "Запланируй день рождения и найди бар у метро Павелецкая",
+            progress_callback=capture_progress,
         )
 
         self.assertIs(result, created)
@@ -228,6 +233,20 @@ class AgentToolOrchestrationTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(first_execution_tools, {"search_places"})
         self.assertEqual(second_execution_tools, {"create_calendar_event"})
+        self.assertEqual(
+            [event.kind for event in progress_events],
+            [
+                "planning",
+                "plan_ready",
+                "tool_started",
+                "tool_completed",
+                "tool_started",
+                "tool_completed",
+                "finalizing",
+            ],
+        )
+        self.assertEqual(progress_events[2].tool_name, "search_places")
+        self.assertEqual(progress_events[4].tool_name, "create_calendar_event")
 
     async def test_standalone_tool_stops_without_calling_unrequested_tools(
         self,

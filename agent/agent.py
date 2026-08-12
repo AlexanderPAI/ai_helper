@@ -23,6 +23,7 @@ from .planning import (
     ActionPlanError,
     action_plan_tool_schema,
 )
+from .progress import AgentProgressCallback, AgentProgressEvent
 from .prompts import load_system_prompt
 from .providers import LLMProvider, LLMResponse
 from .results import MediaResult, StructuredToolResult, ToolResult
@@ -115,6 +116,8 @@ class Agent:
         self, state: AgentState, config: RunnableConfig
     ) -> AgentState:
         context = self._runtime_context(config)
+        progress_callback = self._progress_callback(config)
+        await self._report_progress(progress_callback, "planning")
         response = await self.provider.agenerate(
             self._messages_for_provider(state, context),
             **self._planning_options(),
@@ -123,6 +126,7 @@ class Agent:
             response,
             state=state,
             context=context,
+            progress_callback=progress_callback,
         )
         update: AgentState = {
             "messages": [self._assistant_message(self._history_text(output))],
@@ -179,6 +183,7 @@ class Agent:
         *,
         state: AgentState,
         context: AgentRuntimeContext | None,
+        progress_callback: AgentProgressCallback | None,
     ) -> ToolResult:
         if self._is_empty_response(response):
             logger.warning("agent empty_initial_response retry=true")
@@ -193,7 +198,11 @@ class Agent:
         plan = self._response_plan(response)
         if plan is None:
             logger.info("agent conversation_response tools_requested=false")
+            await self._report_progress(progress_callback, "finalizing")
             return self._visible_model_output(response.content)
+        await self._report_progress(
+            progress_callback, "plan_ready", total_steps=len(plan.steps)
+        )
         logger.info(
             "agent plan_created goals=%d steps=%d tools=%s",
             len(plan.goals),
@@ -212,6 +221,7 @@ class Agent:
             context=context,
             plan=plan,
             flow_messages=messages,
+            progress_callback=progress_callback,
         )
 
     def _complete_tool_flow(
@@ -302,6 +312,7 @@ class Agent:
         context: AgentRuntimeContext | None,
         plan: ActionPlan,
         flow_messages: list[Message],
+        progress_callback: AgentProgressCallback | None,
     ) -> ToolResult:
         if not isinstance(response, LLMResponse):
             raise TypeError("provider must return an LLMResponse")
@@ -322,6 +333,14 @@ class Agent:
             self._log_tool_calls(response, event="tool_started")
             results = []
             for tool_call in response.tool_calls:
+                step_number = len(completed_steps) + 1
+                await self._report_progress(
+                    progress_callback,
+                    "tool_started",
+                    tool_name=tool_call.name,
+                    step_number=step_number,
+                    total_steps=len(plan.steps),
+                )
                 try:
                     tool = self.tools[tool_call.name]
                 except KeyError as error:
@@ -329,6 +348,13 @@ class Agent:
                         f"unknown tool requested: {tool_call.name}"
                     ) from error
                 results.append(await tool.ainvoke(tool_call.arguments, context=context))
+                await self._report_progress(
+                    progress_callback,
+                    "tool_completed",
+                    tool_name=tool_call.name,
+                    step_number=step_number,
+                    total_steps=len(plan.steps),
+                )
             last_output = self._combine_tool_results(results)
             self._log_tool_calls(response, event="tool_completed")
             completed_steps = plan.completed_after_calls(
@@ -346,6 +372,7 @@ class Agent:
                 **self._provider_options(plan.ready_tools(completed_steps)),
             )
             if not response.tool_calls:
+                await self._report_progress(progress_callback, "finalizing")
                 content = self._sanitize_model_output(response.content)
                 output = (
                     last_output
@@ -629,11 +656,13 @@ class Agent:
         self,
         session_id: UUID | None = None,
         runtime_context: AgentRuntimeContext | None = None,
+        progress_callback: AgentProgressCallback | None = None,
     ) -> dict[str, Any]:
         return {
             "configurable": {
                 "thread_id": self._thread_id(session_id),
                 "runtime_context": runtime_context,
+                "progress_callback": progress_callback,
             },
         }
 
@@ -643,6 +672,30 @@ class Agent:
         if context is not None and not isinstance(context, AgentRuntimeContext):
             raise TypeError("runtime_context must be an AgentRuntimeContext")
         return context
+
+    @staticmethod
+    def _progress_callback(config: RunnableConfig) -> AgentProgressCallback | None:
+        return config.get("configurable", {}).get("progress_callback")
+
+    @staticmethod
+    async def _report_progress(
+        callback: AgentProgressCallback | None,
+        kind: str,
+        *,
+        tool_name: str | None = None,
+        step_number: int | None = None,
+        total_steps: int | None = None,
+    ) -> None:
+        if callback is None:
+            return
+        await callback(
+            AgentProgressEvent(
+                kind=kind,  # type: ignore[arg-type]
+                tool_name=tool_name,
+                step_number=step_number,
+                total_steps=total_steps,
+            )
+        )
 
     @staticmethod
     def _runtime_prompt(context: AgentRuntimeContext) -> str:
@@ -694,11 +747,12 @@ class Agent:
         *,
         session_id: UUID | None = None,
         runtime_context: AgentRuntimeContext | None = None,
+        progress_callback: AgentProgressCallback | None = None,
     ) -> ToolResult:
         """Asynchronously send a prompt within a session."""
         result = await self.graph.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]},
-            config=self._config(session_id, runtime_context),
+            config=self._config(session_id, runtime_context, progress_callback),
         )
         return result["output"]
 
